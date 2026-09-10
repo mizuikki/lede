@@ -47,7 +47,7 @@ endef
 define U-Boot/an7581_rfb
   NAME:=AN7581 Reference Board
   UBOOT_CONFIG:=an7581_evb
-  BUILD_DEVICES:=airoha_an7581-evb
+  BUILD_DEVICES:=airoha_an7581-evb airoha_an7581-evb-emmc-eagle airoha_an7581-evb-emmc-kite
   BUILD_SUBTARGET:=an7581
   UBOOT_IMAGE:=u-boot.fip
   BL2_IMAGE:=an7581-bl2.bin
@@ -57,7 +57,7 @@ endef
 define U-Boot/an7583_rfb
   NAME:=AN7583 Reference Board
   UBOOT_CONFIG:=an7583_evb
-  BUILD_DEVICES:=airoha_an7583-evb
+  BUILD_DEVICES:=airoha_an7583-evb airoha_an7583-evb-emmc
   BUILD_SUBTARGET:=an7583
   UBOOT_IMAGE:=u-boot.fip
   BL2_IMAGE:=an7583-bl2.bin

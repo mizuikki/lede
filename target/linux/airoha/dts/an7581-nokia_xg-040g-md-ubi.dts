@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
+/dts-v1/;
 #include "an7581-nokia_xg-040g-md-common.dtsi"
 
 / {
