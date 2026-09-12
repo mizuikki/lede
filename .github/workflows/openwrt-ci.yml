@@ -15,7 +15,7 @@ on:
         required: false
         default: manual
       source_sha:
-        description: Commit SHA to build
+        description: Full commit SHA to build (empty uses the selected workflow ref)
         required: false
         default: ""
 
@@ -38,11 +38,31 @@ jobs:
   build_openwrt:
 
     name: Build OpenWrt Firmware
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
 
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - name: Resolve build source
+        id: source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+
+          if ! git cat-file -e "${WORKFLOW_SHA}^{commit}"; then
+            git fetch --no-tags origin "$WORKFLOW_SHA"
+          fi
+          git show "${WORKFLOW_SHA}:scripts/ci-source-info.sh" > "$RUNNER_TEMP/ci-source-info.sh"
+          bash "$RUNNER_TEMP/ci-source-info.sh" >> "$GITHUB_OUTPUT"
+
       - name: Space cleanup and Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -66,12 +86,6 @@ jobs:
           sudo -E apt clean
           sudo -E timedatectl set-timezone "Asia/Shanghai"
 
-      - name: Checkout OpenWrt
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ inputs.source_sha != '' && inputs.source_sha || github.ref }}
-
       - name: Update feeds and generate configuration file
         run: ./scripts/apply-profile.sh "${PROFILE_NAME}" --sync-all-feeds
 
@@ -92,13 +106,17 @@ jobs:
 
       - name: Prepare release assets
         id: prepare_release
+        env:
+          BUILD_REASON: ${{ inputs.build_reason || 'manual' }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SOURCE_SHORT_SHA: ${{ steps.source.outputs.short_sha }}
         run: |
           set -euo pipefail
 
-          build_reason="${{ inputs.build_reason != '' && inputs.build_reason || 'manual' }}"
+          build_reason="$BUILD_REASON"
           build_stamp="$(date -u +'%Y%m%d-%H%M%S')"
           build_date="$(date -u +'%Y-%m-%d %H:%M:%SZ')"
-          short_sha="$(git rev-parse --short HEAD)"
+          short_sha="$SOURCE_SHORT_SHA"
           release_dir="${GITHUB_WORKSPACE}/release-assets"
           metadata_dir="${GITHUB_WORKSPACE}/release-metadata"
           notes_file="${GITHUB_WORKSPACE}/release-notes.md"
@@ -143,8 +161,10 @@ jobs:
           Workflow: ${GITHUB_WORKFLOW}
           Run ID: ${GITHUB_RUN_ID}
           Run Attempt: ${GITHUB_RUN_ATTEMPT}
-          Branch: ${GITHUB_REF_NAME}
-          Commit: ${GITHUB_SHA}
+          Workflow Ref: ${GITHUB_REF}
+          Workflow Commit: ${GITHUB_WORKFLOW_SHA}
+          Dispatch Commit: ${GITHUB_SHA}
+          Commit: ${SOURCE_SHA}
           Short Commit: ${short_sha}
           Profile: ${PROFILE_NAME}
           Build Reason: ${build_reason}
@@ -157,11 +177,13 @@ jobs:
           )
 
           cat > "${notes_file}" <<EOF
-          Automated latest build for \`${PROFILE_NAME}\`.
+          Automated build for \`${PROFILE_NAME}\`.
 
           - Repository: \`${GITHUB_REPOSITORY}\`
-          - Branch: \`${GITHUB_REF_NAME}\`
-          - Commit: \`${GITHUB_SHA}\`
+          - Workflow ref: \`${GITHUB_REF}\`
+          - Workflow commit: \`${GITHUB_WORKFLOW_SHA}\`
+          - Dispatch commit: \`${GITHUB_SHA}\`
+          - Commit: \`${SOURCE_SHA}\`
           - Short Commit: \`${short_sha}\`
           - Build Reason: \`${build_reason}\`
           - Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
@@ -176,9 +198,35 @@ jobs:
             echo "notes_file=${notes_file}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Check release eligibility
+        id: release_gate
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          fi
+          bash "$RUNNER_TEMP/ci-source-info.sh" >> "$GITHUB_OUTPUT"
+
+      - name: Upload candidate build artifacts
+        if: steps.release_gate.outputs.publish_release != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: openwrt-${{ env.PROFILE_NAME }}-${{ steps.source.outputs.short_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare_release.outputs.release_dir }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
       - name: Publish history release
+        if: steps.release_gate.outputs.publish_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
 
@@ -196,13 +244,14 @@ jobs:
           gh release create "${history_tag}" "${assets[@]}" \
             --title "${history_name}" \
             --notes-file "${notes_file}" \
-            --target "${GITHUB_SHA}" \
+            --target "${SOURCE_SHA}" \
             --latest=false
 
       - name: Publish latest release
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: steps.release_gate.outputs.publish_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
 
@@ -229,7 +278,7 @@ jobs:
               fi
             done < <(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')
 
-            git tag -f "${RELEASE_TAG}" "${GITHUB_SHA}"
+            git tag -f "${RELEASE_TAG}" "${SOURCE_SHA}"
             git push origin "refs/tags/${RELEASE_TAG}" --force
 
             gh release edit "${RELEASE_TAG}" \
@@ -237,7 +286,7 @@ jobs:
               --notes-file "${notes_file}" \
               --latest
           else
-            git tag -f "${RELEASE_TAG}" "${GITHUB_SHA}"
+            git tag -f "${RELEASE_TAG}" "${SOURCE_SHA}"
             git push origin "refs/tags/${RELEASE_TAG}" --force
 
             gh release create "${RELEASE_TAG}" "${assets[@]}" \
@@ -248,6 +297,7 @@ jobs:
           fi
 
       - name: Delete history releases older than retention window
+        if: steps.release_gate.outputs.publish_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

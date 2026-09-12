@@ -136,6 +136,12 @@ scripts/sync-feeds.sh
 ./scripts/diffconfig.sh > profiles/x86_64-passwall-docker.diffconfig
 ```
 
+### 5) 候选构建与上游同步
+
+指定 commit 的候选 CI、产物来源和后续同步方案见
+[上游同步与候选构建设计](doc/upstream-sync.md)。候选构建保留 Actions
+artifacts；正式 release 使用实际构建的源码 SHA。
+
 如果需要重新配置：
 
 ```bash

@@ -138,3 +138,18 @@ Apply profile after syncing all feeds (update + install):
 ```sh
 scripts/apply-profile.sh x86_64-passwall-docker --sync-all-feeds
 ```
+
+## `ci-source-info.sh`
+
+Prints `source_sha`, `short_sha`, and `publish_release` for the checked-out
+commit. It requires `EXPECTED_SOURCE_SHA` (a full commit SHA), `DEFAULT_BRANCH`,
+and `GITHUB_REF`. A mismatched checkout or missing default-branch reference is
+an error. Publication requires a dispatch on the default branch and a source
+SHA equal to `origin/<default-branch>`.
+
+`OpenWrt-CI` reads this helper from the workflow commit, so it can also build
+older source commits. It refreshes the default branch and calls the helper
+again before publishing. Candidate builds are downloadable Actions artifacts.
+
+See [upstream sync and candidate build design](../doc/upstream-sync.md) for the
+workflow contract, validation command, and the proposed long-term sync flow.
