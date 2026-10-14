@@ -9,7 +9,7 @@ Applies a single-file diffconfig profile from profiles/<name>.diffconfig to
 generate a full .config, then runs "make defconfig" to close dependencies.
 
 Options:
-  --update-passwall     Update Passwall feeds before applying (default)
+  --update-passwall     Update all feeds, including Passwall, before applying (default)
   --no-update-passwall  Skip updating feeds
   --install-passwall    Run feeds install for Passwall feeds after update
   --sync-all-feeds      Run scripts/sync-feeds.sh (update+install all feeds) before applying
@@ -55,19 +55,20 @@ fi
 update_passwall=1
 install_passwall=0
 install_passwall_set=0
-sync_all_feeds=0
+sync_all_feeds=1
+sync_all_feeds_set=0
 force_feeds=0
 locked_feeds=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --update-passwall) update_passwall=1; shift ;;
-    --no-update-passwall) update_passwall=0; shift ;;
+    --update-passwall) update_passwall=1; sync_all_feeds=1; shift ;;
+    --no-update-passwall) update_passwall=0; sync_all_feeds=0; shift ;;
     --install-passwall) install_passwall=1; install_passwall_set=1; shift ;;
-    --sync-all-feeds) sync_all_feeds=1; shift ;;
-    --locked-feeds) locked_feeds=1; update_passwall=0; install_passwall=0; shift ;;
+    --sync-all-feeds) sync_all_feeds=1; sync_all_feeds_set=1; shift ;;
+    --locked-feeds) locked_feeds=1; sync_all_feeds=0; update_passwall=0; install_passwall=0; shift ;;
     --force-feeds) force_feeds=1; shift ;;
-    --defconfig-only) update_passwall=0; install_passwall=0; shift ;;
+    --defconfig-only) update_passwall=0; sync_all_feeds=0; install_passwall=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "Unknown option: $1" >&2
@@ -77,7 +78,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$locked_feeds" -eq 1 && ( "$sync_all_feeds" -eq 1 || "$force_feeds" -eq 1 ) ]]; then
+if [[ "$locked_feeds" -eq 1 && ( "$sync_all_feeds_set" -eq 1 || "$force_feeds" -eq 1 ) ]]; then
   echo "Error: --locked-feeds cannot be combined with --sync-all-feeds or --force-feeds" >&2
   exit 2
 fi
@@ -106,7 +107,11 @@ elif [[ "$sync_all_feeds" -eq 1 ]]; then
     exit 1
   fi
   echo "[0/4] Syncing all feeds (update+install)"
-  scripts/sync-feeds.sh
+  if [[ "$force_feeds" -eq 1 ]]; then
+    scripts/sync-feeds.sh --force
+  else
+    scripts/sync-feeds.sh
+  fi
 fi
 
 if [[ "$update_passwall" -eq 1 && "$sync_all_feeds" -eq 0 ]]; then
@@ -126,10 +131,12 @@ if [[ "$update_passwall" -eq 1 && "$sync_all_feeds" -eq 0 ]]; then
   fi
 else
   echo "[1/4] Skipping Passwall feed update"
-  if [[ "$install_passwall" -eq 1 ]]; then
+  if [[ "$install_passwall" -eq 1 && "$sync_all_feeds" -eq 0 && "$locked_feeds" -eq 0 ]]; then
     echo "Note: --install-passwall requires updating feeds; ignoring install step."
   fi
 fi
+
+python3 scripts/check-build-inputs.py --goal profile --config "$profile_path"
 
 echo "[2/4] Seeding .config from profile"
 cp "$profile_path" .config

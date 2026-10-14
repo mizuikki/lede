@@ -67,6 +67,9 @@ if [[ "$force" -eq 1 ]]; then
   update_args+=("-f")
 fi
 
+mkdir -p .cache/feed-sync
+echo "Partial feed update requires a successful full synchronization before building." > .cache/feed-sync/FAILED
+
 echo "[1/3] Updating feeds: passwall_packages passwall_luci"
 ./scripts/feeds update "${update_args[@]}" passwall_packages passwall_luci
 

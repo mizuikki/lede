@@ -7,6 +7,10 @@ Usage: scripts/sync-feeds.sh [options] [feedname...]
 
 Synchronize OpenWrt/LEDE feeds using ./scripts/feeds.
 
+Full synchronization prepares an isolated snapshot and updates the feed lock.
+Existing user changes are preserved and stop the operation. Selective maintenance
+requires a subsequent successful full synchronization before building.
+
 By default, this script updates AND installs all feeds (-a).
 If one or more feed names are provided, only those feeds are synced.
 After feed update, this script refreshes feeds/packages/lang/perl from the
@@ -70,31 +74,20 @@ if [[ "$locked" -eq 1 ]]; then
     echo "Error: --locked must be used alone; it always installs all locked feeds and overlays." >&2
     exit 2
   fi
-  if [[ ! -f "$lock_file" ]]; then
-    echo "Error: feed lock not found: $lock_file" >&2
-    exit 1
-  fi
-  if [[ -e "$TOPDIR/feeds.conf" ]]; then
-    echo "Error: feeds.conf already exists; refusing to replace a local feed configuration." >&2
-    exit 1
-  fi
-  cleanup_locked_config() {
-    rm -f "$TOPDIR/feeds.conf"
-  }
-  trap cleanup_locked_config EXIT
-
-  echo "[1/4] Materializing pinned feed configuration"
-  python3 scripts/feed-lock.py materialize --lock "$lock_file" --output feeds.conf
-  echo "[2/4] Installing pinned Git feeds"
-  ./scripts/feeds update -a
-  echo "[3/4] Applying locked official Perl and dockerd overlays"
-  ./scripts/sync-official-perl.sh --locked --lock-file "$lock_file"
-  ./scripts/stage-dockerd-build-patch.sh --locked --lock-file "$lock_file"
-  echo "[4/4] Installing feed packages and verifying all inputs"
-  ./scripts/feeds install -a
-  python3 scripts/feed-lock.py verify --root "$TOPDIR" --lock "$lock_file" --feeds-conf "$TOPDIR/feeds.conf.default"
-  exit 0
+  exec python3 scripts/sync-feeds-transaction.py --locked --lock-file "$lock_file"
 fi
+
+if [[ "${#feeds[@]}" -eq 0 && "$do_update" -eq 1 && "$do_install" -eq 1 && "$sync_perl" -eq 1 ]]; then
+  if [[ "$force" -eq 1 ]]; then
+    echo "Note: full synchronization uses clean temporary checkouts; --force never discards existing changes."
+  fi
+  exec python3 scripts/sync-feeds-transaction.py
+fi
+
+# Selective maintenance is not a complete snapshot. Block builds until a full
+# transaction reconciles the feeds, overlays and tracked lock.
+mkdir -p .cache/feed-sync
+echo "Selective feed maintenance requires a successful full synchronization before building." > .cache/feed-sync/FAILED
 
 update_args=()
 install_args=()
@@ -162,3 +155,5 @@ if [[ "$do_install" -eq 1 ]]; then
 else
   echo "[4/4] Skipping feeds install (--update-only)"
 fi
+
+echo "Selective maintenance complete. Run scripts/sync-feeds.sh or scripts/sync-feeds.sh --locked before building."

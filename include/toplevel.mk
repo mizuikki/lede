@@ -219,6 +219,7 @@ WARN_PARALLEL_ERROR = $(if $(BUILD_LOG),,$(and $(filter -j,$(MAKEFLAGS)),$(finds
 ifeq ($(SDK),1)
 
 %::
+	@python3 $(TOPDIR)/scripts/check-build-inputs.py --goal "$@"
 	@+$(PREP_MK) $(NO_TRACE_MAKE) -r -s prereq
 	@./scripts/config/conf $(KCONF_FLAGS) --defconfig=.config Config.in
 	@+$(ULIMIT_FIX) $(SUBMAKE) -r $@
@@ -226,6 +227,7 @@ ifeq ($(SDK),1)
 else
 
 %::
+	@python3 $(TOPDIR)/scripts/check-build-inputs.py --goal "$@"
 	@+$(PREP_MK) $(NO_TRACE_MAKE) -r -s prereq
 	@( \
 		cp .config tmp/.config; \

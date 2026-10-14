@@ -153,7 +153,10 @@ def create_lock(root: Path, feeds_config: Path) -> dict:
             revision = feed["configured_revision"]
             branch = feed["branch"]
         else:
-            revision, resolved_branch = resolve_ref(feed["url"], feed["branch"])
+            try:
+                revision, resolved_branch = resolve_ref(feed["url"], feed["branch"])
+            except LockError as exc:
+                raise LockError(f"cannot resolve feed {feed['name']}: {exc}") from exc
             branch = feed["branch"] or resolved_branch
         feeds.append({
             "name": feed["name"],
@@ -221,6 +224,19 @@ def load_lock(path: Path) -> dict:
     for value in (perl.get("sha256"), patch.get("sha256")):
         if not re.fullmatch(r"[0-9a-f]{64}", str(value or "")):
             raise LockError("overlay lock must contain full SHA-256 digests")
+    requirements = lock.get("go_packages", {})
+    if not isinstance(requirements, dict):
+        raise LockError("Go package requirements must be an object")
+    for name, requirement in requirements.items():
+        if name not in ("xray-core", "sing-box") or not isinstance(requirement, dict):
+            raise LockError(f"unsupported Go package requirement: {name}")
+        if not re.fullmatch(r"[0-9][A-Za-z0-9_.-]*", str(requirement.get("version", ""))):
+            raise LockError(f"invalid package version for {name}")
+        if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", str(requirement.get("go_version", ""))):
+            raise LockError(f"invalid Go version requirement for {name}")
+        for key in ("source_sha256", "go_mod_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(requirement.get(key, ""))):
+                raise LockError(f"invalid {key} for {name}")
     return lock
 
 

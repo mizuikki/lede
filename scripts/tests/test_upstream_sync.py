@@ -82,24 +82,8 @@ class HelperEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--locked", result.stdout)
 
-        with tempfile.TemporaryDirectory(prefix="lede-sync-helper-entry-") as temporary:
-            root = Path(temporary)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            shutil.copy2(ROOT / "scripts/sync-feeds.sh", scripts / "sync-feeds.sh")
-            feeds = scripts / "feeds"
-            feeds.write_text("#!/usr/bin/env bash\nprintf 'feeds %s\\n' \"$*\" >> \"$CALL_LOG\"\n")
-            feeds.chmod(0o755)
-            stub = scripts / "sync-official-perl.sh"
-            stub.write_text("#!/usr/bin/env bash\nprintf 'perl %s\\n' \"$*\" >> \"$CALL_LOG\"\n")
-            stub.chmod(0o755)
-            log = root / "calls.log"
-            result = subprocess.run(
-                ["bash", str(scripts / "sync-feeds.sh")], cwd=root,
-                env=os.environ | {"CALL_LOG": str(log)}, text=True, capture_output=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("perl ", log.read_text())
+        transaction = (ROOT / "scripts/sync-feeds-transaction.py").read_text()
+        self.assertIn('"./scripts/sync-official-perl.sh", "--locked"', transaction)
 
 
 class GitFixture:

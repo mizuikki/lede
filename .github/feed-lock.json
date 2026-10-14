@@ -22,7 +22,7 @@
       "url": "https://github.com/coolsnowwolf/packages.git",
       "branch": "master",
       "configured_branch": null,
-      "revision": "3cfeea42e66253d728773ec457e18282f5d9f6fd",
+      "revision": "3d95b298933ef0ece9d007ed8de2185e39416979",
       "order": 3
     },
     {
@@ -30,7 +30,7 @@
       "url": "https://github.com/coolsnowwolf/luci.git",
       "branch": "openwrt-25.12",
       "configured_branch": "openwrt-25.12",
-      "revision": "cae27bd8ad448b7d6216c581cd2852ffa971b1c5",
+      "revision": "9ee71ced1dc0e0fbb8722297bcff81ccb0e1f9a4",
       "order": 4
     },
     {
@@ -71,6 +71,20 @@
       "path": "patches/dockerd/100-skip-host-nested-binaries.patch",
       "staged_path": "feeds/packages/utils/dockerd/patches/999-openwrt-skip-host-nested-binaries.patch",
       "sha256": "324f61d01039d723085619229d592f4a6ce456e9556e873bdb3228c00b061325"
+    }
+  },
+  "go_packages": {
+    "xray-core": {
+      "version": "26.10.10",
+      "source_sha256": "bc4b3fbe9f2612a7e8b7fffd4b7195f00ad4aa28478f3621fce925cb6190c036",
+      "go_mod_sha256": "8cde5eb95a6b84a1ae98b8a80b2786bf3786bbba2bc995d37f27bb0d9d5bd66b",
+      "go_version": "1.27"
+    },
+    "sing-box": {
+      "version": "1.14.3",
+      "source_sha256": "9a8e3712a5f611ad95f1d16874bbdcdffbd3b8eed16dae2d71ce7042a33c3386",
+      "go_mod_sha256": "bcddd492e73c480f878206d36816ae0dbd1cae1a777da57b0fd034e9da721d19",
+      "go_version": "1.25.5"
     }
   }
 }

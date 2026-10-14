@@ -104,12 +104,12 @@ make V=s -j$(nproc)
 
 ## 使用场景（本 fork 增强）
 
-### 1) 追踪 Passwall 上游 + 使用 profile 固化配置
+### 1) 全量同步依赖 + 使用 profile 固化配置
 
-适用于：希望每次编译都同步 Passwall 上游最新，同时保持配置稳定可复用。
+默认同步所有启用 feeds，包括 Passwall 及其 Go 工具链依赖，避免新核心与旧工具链混用。
 
 ```bash
-scripts/apply-profile.sh x86_64-passwall-docker
+scripts/apply-profile.sh x86_64-passwall-docker &&
 make -j"$(nproc)"
 ```
 
@@ -118,9 +118,38 @@ make -j"$(nproc)"
 适用于：你改动了 `feeds.conf.default` 的多个 feed，或者希望全量升级所有 feed 的包后再编译。
 
 ```bash
-scripts/apply-profile.sh x86_64-passwall-docker --sync-all-feeds
+scripts/apply-profile.sh x86_64-passwall-docker --sync-all-feeds &&
 make -j"$(nproc)"
 ```
+
+全量同步先解析所有分支的完整 SHA，在临时源码目录安装所有 feeds、固定版本的
+官方 Perl 和 Docker 补丁，并从通过 `PKG_HASH` 校验的 Xray/Sing-Box 源码检查
+`go.mod` 的 Go 版本要求。全部检查成功后才替换 feeds 和包链接，并更新
+`.github/feed-lock.json`；下载、索引或依赖检查失败时保留原来的 feeds。
+
+已有 feeds 中的脚本覆盖必须与已知摘要一致。用户的 staged、unstaged、untracked
+修改和本地提交会阻止替换，不会执行强制重置。成功替换前的 feeds、包链接和锁
+保存在 `.cache/feed-sync/backups/`，便于找回旧环境。失败会留下构建阻断标记，
+必须重新成功执行全量同步或锁定安装后才能编译，不能只手工删除标记。
+
+首次升级 Go 时，如果构建提示现有 OpenWrt Go 编译器与 feed 版本不一致，先运行：
+
+```bash
+make package/feeds/packages/golang/host/clean &&
+make -j"$(nproc)" package/feeds/packages/golang/host/compile V=s &&
+make -j"$(nproc)"
+```
+
+确认新快照并提交代码和 `.github/feed-lock.json` 后，正式构建或重试使用同一份锁，
+不再次追踪远端分支：
+
+```bash
+scripts/apply-profile.sh x86_64-passwall-docker --locked-feeds &&
+make -j"$(nproc)"
+```
+
+单独运行 `scripts/update-passwall.sh` 或选择性 feeds 维护后，需要全量同步才能
+重新构建。同步和编译应顺序执行。
 
 ### 3) 仅同步 feeds（不应用 profile）
 

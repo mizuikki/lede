@@ -120,11 +120,23 @@ contract 提供可自动核对的保护项，不替代对全部 126 个有效树
 SHA-256。候选的 manifest 保存 lock 摘要。`scripts/feed-lock.py` 可创建、物化、
 校验和计算 lock 摘要。
 
-`scripts/sync-feeds.sh --locked` 临时生成 `feeds.conf` 并按锁安装 feeds，再以
-锁定 Perl revision 覆盖 packages feed、staging dockerd patch、安装 feed packages，
-最后检查所有 feed HEAD、Perl 内容、补丁内容和 packages feed 非预期改动。它拒绝
-覆盖现有 `feeds.conf`。`apply-profile.sh --locked-feeds` 先执行锁定安装再展开
-profile；`make` 重试使用已安装的同一输入，不刷新 feed 或 lock。
+`scripts/sync-feeds.sh` 先解析所有启用 feed 的完整 SHA，在隔离的临时源码目录
+完成安装、Perl/Docker 覆盖、索引生成和 Xray/Sing-Box Go 版本要求检查。源代码
+压缩包必须通过 feed 中的 `PKG_HASH`；全量同步将源码和 `go.mod` 摘要及最低 Go
+版本写入锁的 `go_packages`。全部成功后才替换 feeds、包链接和锁，替换失败会
+回滚。旧 feeds、包链接和锁保留在 `.cache/feed-sync/backups/`。
+
+`scripts/sync-feeds.sh --locked` 使用同一隔离流程，但仅消费既有锁，不刷新远端
+分支或修改锁。两个模式均拒绝已有 `feeds.conf`，拒绝用户的本地提交、staged、
+unstaged、untracked 改动；仅允许匹配已知摘要的 Perl/Docker 自动覆盖。旧版
+Perl 覆盖可通过官方缓存提交树摘要识别。所有 feed 工作树均进行核对。
+`apply-profile.sh --locked-feeds` 安装锁定输入后再展开 profile。
+
+默认 profile 应用也执行全量同步。全量同步是选择新版本、更新锁的操作；正式
+构建使用经审查并提交的锁。同步失败或选择性维护会阻断后续构建，需成功完成
+全量同步或锁定安装后恢复。构建前检查源代码 Go 要求以及已有 OpenWrt Go
+编译器是否与 feed 版本一致；重建 golang/host 的 clean/compile 路径仍可使用。
+`make` 重试使用已安装的同一输入，不刷新 feed 或 lock。
 
 构建在开始和结束时核对 lock 与 fork contract。artifact 保存 lock、实际 feed
 revision、`.config`、diffconfig、package manifest、buildinfo、checksums、contract

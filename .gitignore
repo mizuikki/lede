@@ -32,3 +32,6 @@ git-src
 .vscode*
 /.cache/
 /customfeeds/official_perl/
+
+# Python helper caches are local build inputs.
+__pycache__/
