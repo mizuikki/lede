@@ -121,10 +121,18 @@ class Contract:
                     required_failures.append(
                         f"profile {group} requires {name}={value}, got {profile.get(name, '<missing>')}"
                     )
+        for name in spec.get("required_disabled_symbols", []):
+            if profile.get(name) != "n":
+                required_failures.append(
+                    f"profile requires {name}=n, got {profile.get(name, '<missing>')}"
+                )
         forbidden = [name for name in spec["forbidden_symbols"] if profile.get(name) in ("y", "m")]
         if self.config_path:
             actual = self.parse_config(self.config_path)
             for name, value in profile.items():
+                # Kconfig may omit disabled options whose dependencies are off.
+                if name in spec["forbidden_symbols"] and value == "n" and name not in actual:
+                    continue
                 if actual.get(name) != value:
                     missing_or_changed.append(f"{name}: expected {value}, got {actual.get(name, '<missing>')}")
             for group, selections in required_groups.items():
@@ -251,8 +259,29 @@ class Contract:
             publisher = jobs.get("publish_release", {})
             publisher_if = str(publisher.get("if", ""))
             build_steps = build.get("steps", [])
-            build_upload = any(str(step.get("uses", "")).startswith("actions/upload-artifact@")
-                               for step in build_steps)
+            publisher_steps = publisher.get("steps", [])
+            upload_indexes = [index for index, step in enumerate(build_steps)
+                              if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+            archive_indexes = [index for index, step in enumerate(build_steps)
+                               if "tar " in step.get("run", "") and "$artifact_dir/" in step.get("run", "")]
+            build_check_indexes = [index for index, step in enumerate(build_steps)
+                                   if "$RUNNER_TEMP/check-build-artifacts.py" in step.get("run", "")
+                                   and "--root \"$GITHUB_WORKSPACE/bin\"" in step.get("run", "")
+                                   and "--contract \"$RUNNER_TEMP/fork-contract.yml\"" in step.get("run", "")]
+            build_upload = bool(upload_indexes)
+            build_artifact_check = bool(
+                build_check_indexes and archive_indexes and upload_indexes
+                and min(build_check_indexes) < min(archive_indexes) < min(upload_indexes)
+            )
+            publisher_check_indexes = [index for index, step in enumerate(publisher_steps)
+                                        if ".trusted-controller/scripts/check-build-artifacts.py" in step.get("run", "")
+                                        and "--release-assets release-assets" in step.get("run", "")]
+            publisher_write_indexes = [index for index, step in enumerate(publisher_steps)
+                                       if "gh release create" in step.get("run", "")]
+            publisher_artifact_check = bool(
+                publisher_check_indexes and publisher_write_indexes
+                and min(publisher_check_indexes) < min(publisher_write_indexes)
+            )
             non_publisher_jobs = [job for name, job in jobs.items() if name != "publish_release"]
             non_publisher_writes = any(
                 value == "write"
@@ -286,6 +315,8 @@ class Contract:
             triggers = permissions = jobs = {}
             publisher_if = ""
             build_upload = False
+            build_artifact_check = False
+            publisher_artifact_check = False
             non_publisher_writes = True
             non_publisher_commands = "gh release git push"
             checkout_credentials = []
@@ -300,6 +331,10 @@ class Contract:
             "workflow_dispatch:" in trusted_workflow,
             "persist-credentials: false" in trusted_workflow,
             "upload-artifact" in trusted_workflow,
+            "${WORKFLOW_SHA}:scripts/check-build-artifacts.py" in trusted_workflow,
+            "${WORKFLOW_SHA}:.github/fork-contract.yml" in trusted_workflow,
+            build_artifact_check,
+            publisher_artifact_check,
             set(triggers) == {"workflow_dispatch"},
             "pull_request_target" not in triggers,
             permissions.get("contents") == "read",

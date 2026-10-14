@@ -213,6 +213,8 @@ jobs:
           fi
           git show "${WORKFLOW_SHA}:scripts/feed-lock.py" > "$RUNNER_TEMP/feed-lock.py"
           git show "${WORKFLOW_SHA}:scripts/verify-fork-contract.py" > "$RUNNER_TEMP/verify-fork-contract.py"
+          git show "${WORKFLOW_SHA}:scripts/check-build-artifacts.py" > "$RUNNER_TEMP/check-build-artifacts.py"
+          git show "${WORKFLOW_SHA}:.github/fork-contract.yml" > "$RUNNER_TEMP/fork-contract.yml"
           git show "${WORKFLOW_SHA}:scripts/ci-build-metadata.py" > "$RUNNER_TEMP/ci-build-metadata.py"
           git show "${WORKFLOW_SHA}:scripts/platform_impact.py" > "$RUNNER_TEMP/platform_impact.py"
           git show "${WORKFLOW_SHA}:scripts/release-notes.py" > "$RUNNER_TEMP/release-notes.py"
@@ -240,6 +242,12 @@ jobs:
 
       - name: Install locked feeds and apply the selected profile
         run: ./scripts/apply-profile.sh "${PROFILE_NAME}" --locked-feeds
+
+      - name: Regression-check profile against real Kconfig defaults
+        run: |
+          set -euo pipefail
+          OPENWRT_KCONFIG_ROOT="$GITHUB_WORKSPACE" \
+            python3 -B -m unittest discover -s scripts/tests -p test_profile_kconfig.py -v
 
       - name: Verify actual configuration, providers, feeds, and overlays
         run: |
@@ -272,6 +280,9 @@ jobs:
           python3 "$RUNNER_TEMP/verify-fork-contract.py" \
             --root "$GITHUB_WORKSPACE" --mode build --config "$GITHUB_WORKSPACE/.config" \
             --source-ref "$SOURCE_SHA" --trusted-ref "$WORKFLOW_SHA"
+          python3 "$RUNNER_TEMP/check-build-artifacts.py" \
+            --root "$GITHUB_WORKSPACE/bin" --contract "$RUNNER_TEMP/fork-contract.yml" \
+            --output "$RUNNER_TEMP/artifact-package-check.json"
 
       - name: Prepare candidate and release artifacts
         id: prepare_artifacts
@@ -296,6 +307,7 @@ jobs:
           tar -C "$metadata_dir" -czf "$artifact_dir/openwrt-${PROFILE_NAME}-buildinfo-${build_stamp}.tar.gz" .
 
           cp .github/feed-lock.json "$artifact_dir/feed-lock.json"
+          cp "$RUNNER_TEMP/artifact-package-check.json" "$artifact_dir/artifact-package-check.json"
           cp .config "$artifact_dir/config.build"
           ./scripts/diffconfig.sh > "$artifact_dir/config.diffconfig"
           find ./bin/targets -type f -name '*.manifest' -print0 | sort -z | xargs -0 -r cat > "$artifact_dir/package-manifests.txt"
@@ -455,6 +467,13 @@ jobs:
             --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --output release-notes.md
           echo "SOURCE_SHA=${SOURCE_SHA}" >> "$GITHUB_ENV"
+
+      - name: Recheck packaged manifests and IPK collection
+        run: |
+          set -euo pipefail
+          python3 .trusted-controller/scripts/check-build-artifacts.py \
+            --release-assets release-assets \
+            --contract .trusted-controller/.github/fork-contract.yml
 
       - name: Publish history release
         run: |

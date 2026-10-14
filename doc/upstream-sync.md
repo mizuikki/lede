@@ -94,7 +94,9 @@ git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
 
 - Passwall feed 顺序、LuCI 分支，以及安装后的 provider symlink；
 - x86 profile 中每个 diffconfig 值是否在实际 `.config` 中保留；失去 target
-  选择或把禁止的 `trojan-plus` 设为 y/m 都会失败；
+  选择或把禁止的 `trojan-plus`、`luci-app-ssr-plus`、
+  `luci-i18n-ssr-plus-zh-cn` 设为 y/m 都会失败。Kconfig 因依赖关闭而省略
+  明确设为 n 的符号时按关闭处理；Passwall、Docker 和共享后端的正向选择仍必须存在；
 - contract 自身固定必需的 target、Passwall/transproxy、Docker、firewall、代理和
   存储选择；候选 profile 与生成 `.config` 分别对照可信 contract，二者同时删掉
   选择也会失败。配置迁移须先审查并显式更新 contract；
@@ -130,6 +132,30 @@ revision、`.config`、diffconfig、package manifest、buildinfo、checksums、c
 artifact，供状态汇总读取；汇总器不下载/解压固件大包。这样锁定源码输入，不承诺
 工具链环境或全部下载源字节级可复现。汇总需要大构建 artifact 与小验证 artifact
 都仍有效；任一过期都会阻止 ready。
+
+#### Passwall profile 的 SSR Plus+ 排除
+
+上游提交 `58dd9b9cb`（2026-08-31）启用了 `helloworld` feed；fork 提交
+`f7b903cf4`（2026-09-10）合入该变化。`include/target.mk` 一直把
+`luci-app-ssr-plus` 放在默认 LuCI 包列表中，而 x86 Passwall profile 原先没有显式
+关闭它，因此 `make defconfig` 会同时选中该应用和可用的中文包。
+
+profile 现在明确关闭 `luci-app-ssr-plus` 与 `luci-i18n-ssr-plus-zh-cn`。
+`helloworld` feed 保持启用，因为 profile 仍从中使用共享软件包；带有 `ssr` 名称的
+`shadowsocksr-libev-ssr-local` 和 `shadowsocksr-libev-ssr-redir` 也是 Passwall 所需
+后端，不能按名称删除。fork contract 在 profile 和生成配置上禁止 SSR Plus+ 应用，
+并允许 Kconfig 因依赖关闭而不输出语言包符号。
+
+`scripts/check-build-artifacts.py` 在固件打包前检查每个 firmware manifest 和待上传
+IPK 集合：拒绝 `luci-app-ssr-plus`、所有 `luci-i18n-ssr-plus-*`，并确认 Passwall、
+中文包及 contract 列出的 Shadowsocks/SSR、Xray、Sing-box 等共享后端仍在 manifest
+和 IPK 集合中。CI 在打包前扫描 `bin/`，发布前再扫描待发布的 manifest 汇总和软件包
+压缩包；本地可运行：
+
+```sh
+python3 scripts/check-build-artifacts.py --root bin
+python3 scripts/check-build-artifacts.py --release-assets release-assets
+```
 
 ### Actions 版本和异步结果
 
@@ -216,7 +242,11 @@ merge、EmmcImage 三侧冲突、上游历史改写、多 merge-base、候选修
 手工冲突登记与重复复用、feeds/overlay staged/unstaged/untracked 漂移、profile 与
 生成配置同时丢失必需选择、PR workflow blob 被替换或删除、任意 W/伪造 metadata、
 受影响平台证据缺失与候选 SHA 变化、错误 run/attempt、skipped job、artifact
-过期、release notes 中的反引号/美元符号/换行，以及发布写权限隔离。
+过期、release notes 中的反引号/美元符号/换行，以及发布写权限隔离。SSR Plus+
+回归还覆盖 profile/`.config` 的 y/m 反选、依赖关闭后缺失的语言包符号、Passwall
+或共享后端缺失，以及 manifest/IPK 清单中的禁用包。实际 Kconfig 展开由
+`scripts/apply-profile.sh x86_64-passwall-docker --defconfig-only` 执行；展开后应看到
+SSR Plus+ 未选择而 `CONFIG_DEFAULT_luci-app-ssr-plus=y` 仍保留。
 
 执行：
 

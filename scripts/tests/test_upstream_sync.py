@@ -989,6 +989,42 @@ class ForkContractTests(unittest.TestCase):
         result = CONTRACT_MODULE.Contract(ROOT, None, "source").run()
         self.assertTrue(result["success"], result["errors"])
 
+    def test_artifact_checks_are_required_before_archiving_and_release_writes(self):
+        path = ".github/workflows/openwrt-ci.yml"
+        original = (ROOT / path).read_text()
+        mutations = (
+            original.replace(
+                '          python3 "$RUNNER_TEMP/check-build-artifacts.py" \\\n'
+                '            --root "$GITHUB_WORKSPACE/bin" --contract "$RUNNER_TEMP/fork-contract.yml" \\\n'
+                '            --output "$RUNNER_TEMP/artifact-package-check.json"\n',
+                "",
+                1,
+            ),
+            original.replace(
+                '      - name: Recheck packaged manifests and IPK collection\n'
+                '        run: |\n'
+                '          set -euo pipefail\n'
+                '          python3 .trusted-controller/scripts/check-build-artifacts.py \\\n'
+                '            --release-assets release-assets \\\n'
+                '            --contract .trusted-controller/.github/fork-contract.yml\n',
+                "",
+                1,
+            ),
+        )
+        for mutated in mutations:
+            with self.subTest(check_removed=mutated != original):
+                checker = CONTRACT_MODULE.Contract(ROOT, None, "source")
+                read = checker.path_text
+                with mock.patch.object(
+                    checker, "path_text",
+                    side_effect=lambda relative, **kwargs: (
+                        mutated if relative == path and not kwargs.get("trusted")
+                        else read(relative, **kwargs)
+                    ),
+                ):
+                    checker.check_provenance()
+                self.assertEqual(checker.checks["source_provenance"]["result"], "failure")
+
     def test_provenance_rejects_direct_pr_build_triggers(self):
         path = ".github/workflows/openwrt-ci.yml"
         original = (ROOT / path).read_text()
