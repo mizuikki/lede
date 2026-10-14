@@ -985,6 +985,28 @@ class FeedLockTests(unittest.TestCase):
 
 
 class ForkContractTests(unittest.TestCase):
+    def test_current_source_contract_accepts_trusted_dispatch_builds(self):
+        result = CONTRACT_MODULE.Contract(ROOT, None, "source").run()
+        self.assertTrue(result["success"], result["errors"])
+
+    def test_provenance_rejects_direct_pr_build_triggers(self):
+        path = ".github/workflows/openwrt-ci.yml"
+        original = (ROOT / path).read_text()
+        for trigger in ("pull_request", "pull_request_target"):
+            with self.subTest(trigger=trigger):
+                checker = CONTRACT_MODULE.Contract(ROOT, None, "source")
+                read = checker.path_text
+                modified = original.replace("on:\n", f"on:\n  {trigger}:\n", 1)
+                with mock.patch.object(
+                    checker, "path_text",
+                    side_effect=lambda relative, **kwargs: (
+                        modified if relative == path and not kwargs.get("trusted")
+                        else read(relative, **kwargs)
+                    ),
+                ):
+                    checker.check_provenance()
+                self.assertEqual(checker.checks["source_provenance"]["result"], "failure")
+
     def test_lost_profile_selection_fails_and_required_paths_use_candidate_tree(self):
         profile = ROOT / "profiles/x86_64-passwall-docker.diffconfig"
         content = profile.read_text()
@@ -1005,11 +1027,17 @@ class ForkContractTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertTrue(any("trojan-plus" in error for error in result["errors"]))
 
-        candidate_checker = object.__new__(CONTRACT_MODULE.Contract)
-        candidate_checker.root = ROOT
-        candidate_checker.source_ref = "HEAD"
-        self.assertTrue((ROOT / ".github/fork-contract.yml").is_file())
-        self.assertFalse(candidate_checker.source_path_exists(".github/fork-contract.yml"))
+        with tempfile.TemporaryDirectory(prefix="lede-contract-source-tree-") as temporary:
+            root = Path(temporary) / "repo"
+            repo = GitFixture(root)
+            commit = repo.commit(repo.tree({"README": "candidate\n"}))
+            (root / ".github").mkdir()
+            (root / ".github/fork-contract.yml").write_text("schema_version: 1\n")
+            candidate_checker = object.__new__(CONTRACT_MODULE.Contract)
+            candidate_checker.root = root
+            candidate_checker.source_ref = commit
+            self.assertTrue((root / ".github/fork-contract.yml").is_file())
+            self.assertFalse(candidate_checker.source_path_exists(".github/fork-contract.yml"))
 
     def test_candidate_profile_and_generated_config_cannot_drop_required_features_together(self):
         with tempfile.TemporaryDirectory(prefix="lede-contract-mutual-drop-") as temporary:

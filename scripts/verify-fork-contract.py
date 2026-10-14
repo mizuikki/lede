@@ -300,7 +300,7 @@ class Contract:
             "workflow_dispatch:" in trusted_workflow,
             "persist-credentials: false" in trusted_workflow,
             "upload-artifact" in trusted_workflow,
-            "workflow_dispatch" in triggers and "pull_request" in triggers,
+            set(triggers) == {"workflow_dispatch"},
             "pull_request_target" not in triggers,
             permissions.get("contents") == "read",
             not any(value == "write" for value in permissions.values()),
