@@ -1,0 +1,71 @@
+name: PR-Build-Dispatch
+run-name: "Dispatch trusted read-only PR build #${{ github.event.pull_request.number }}"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - edited
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: pr-build-dispatch-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch_read_only_build:
+    name: Dispatch exact pull request build
+    if: >-
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      !github.event.pull_request.draft &&
+      !startsWith(github.event.pull_request.head.ref, 'sync/upstream-')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: read
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      WORKFLOW_SHA: ${{ github.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+    steps:
+      - name: Checkout only the trusted base controller
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Dispatch an exact build without checking out PR code
+        run: |
+          set -euo pipefail
+          python3 scripts/pr-build-dispatch.py \
+            --repository "$REPOSITORY" \
+            --workflow-sha "$WORKFLOW_SHA" \
+            --pull-request "$PR_NUMBER" \
+            --head-sha "$PR_HEAD_SHA" \
+            --base-sha "$PR_BASE_SHA" \
+            --merge-sha "$PR_MERGE_SHA" \
+            --output pr-dispatch-record.json
+
+      - name: Upload dispatch identity
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-build-dispatch-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: pr-dispatch-record.json
+          if-no-files-found: warn
+          retention-days: 14

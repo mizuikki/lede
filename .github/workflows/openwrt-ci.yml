@@ -1,11 +1,5 @@
-# 
-# <https://github.com/KFERMercer/OpenWrt-CI>
-#
-# Copyright (C) 2019 P3TERX
-#
-# Copyright (C) 2020 KFERMercer
-#
 name: OpenWrt-CI
+run-name: OpenWrt ${{ inputs.sync_id && format('{0} {1}', inputs.sync_id, inputs.source_sha) || (inputs.pull_request && format('pr-{0} {1}', inputs.pull_request, inputs.source_sha)) || format('manual-{0}', github.run_id) }}
 
 on:
   workflow_dispatch:
@@ -14,13 +8,60 @@ on:
         description: Build reason
         required: false
         default: manual
+        type: string
       source_sha:
-        description: Full commit SHA to build (empty uses the selected workflow ref)
+        description: Full commit SHA to build
         required: false
         default: ""
+        type: string
+      sync_id:
+        description: Stable upstream candidate identifier
+        required: false
+        default: ""
+        type: string
+      base_sha:
+        description: Pinned fork base SHA
+        required: false
+        default: ""
+        type: string
+      upstream_sha:
+        description: Pinned upstream SHA
+        required: false
+        default: ""
+        type: string
+      merge_base_sha:
+        description: Unique pinned merge-base SHA
+        required: false
+        default: ""
+        type: string
+      feed_lock_sha256:
+        description: Canonical SHA-256 of the candidate feed lock
+        required: false
+        default: ""
+        type: string
+      pull_request:
+        description: Exact pull request number for a trusted read-only dispatch
+        required: false
+        default: ""
+        type: string
+      pull_head_sha:
+        description: Exact pull request head SHA
+        required: false
+        default: ""
+        type: string
+      pull_base_sha:
+        description: Exact pull request base SHA and trusted workflow version
+        required: false
+        default: ""
+        type: string
+      pull_merge_sha:
+        description: Exact pull request merge SHA built by this run
+        required: false
+        default: ""
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: openwrt-ci-${{ github.ref }}
@@ -34,36 +75,149 @@ env:
   RELEASE_NAME: Latest x86_64 Passwall Docker Build
 
 jobs:
-
-  build_openwrt:
-
-    name: Build OpenWrt Firmware
-
+  validate_source:
+    name: validate_source
     runs-on: ubuntu-latest
-
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      short_sha: ${{ steps.source.outputs.short_sha }}
+      feed_lock_sha256: ${{ steps.lock.outputs.feed_lock_sha256 }}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+      SYNC_ID: ${{ inputs.sync_id || '' }}
+      INPUT_BASE_SHA: ${{ inputs.base_sha || '' }}
+      INPUT_UPSTREAM_SHA: ${{ inputs.upstream_sha || '' }}
+      INPUT_MERGE_BASE_SHA: ${{ inputs.merge_base_sha || '' }}
+      INPUT_FEED_LOCK_SHA256: ${{ inputs.feed_lock_sha256 || '' }}
+      INPUT_PULL_REQUEST: ${{ inputs.pull_request || '' }}
+      INPUT_PULL_HEAD_SHA: ${{ inputs.pull_head_sha || '' }}
+      INPUT_PULL_BASE_SHA: ${{ inputs.pull_base_sha || '' }}
+      INPUT_PULL_MERGE_SHA: ${{ inputs.pull_merge_sha || '' }}
     steps:
-      - name: Checkout OpenWrt
+      - name: Checkout the requested source commit
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Resolve build source
-        id: source
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
-          WORKFLOW_SHA: ${{ github.workflow_sha }}
+      - name: Fetch trusted workflow source and current default branch
         run: |
           set -euo pipefail
-
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
           if ! git cat-file -e "${WORKFLOW_SHA}^{commit}"; then
             git fetch --no-tags origin "$WORKFLOW_SHA"
           fi
           git show "${WORKFLOW_SHA}:scripts/ci-source-info.sh" > "$RUNNER_TEMP/ci-source-info.sh"
+          git show "${WORKFLOW_SHA}:scripts/feed-lock.py" > "$RUNNER_TEMP/feed-lock.py"
+          git show "${WORKFLOW_SHA}:scripts/verify-fork-contract.py" > "$RUNNER_TEMP/verify-fork-contract.py"
+
+      - name: Resolve and verify the checked out source SHA
+        id: source
+        env:
+          EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+        run: |
+          set -euo pipefail
           bash "$RUNNER_TEMP/ci-source-info.sh" >> "$GITHUB_OUTPUT"
 
-      - name: Space cleanup and Initialization environment
+      - name: Check the candidate identity and pinned base
+        if: inputs.sync_id != ''
+        run: |
+          set -euo pipefail
+          for sha in "$INPUT_BASE_SHA" "$INPUT_UPSTREAM_SHA" "$INPUT_MERGE_BASE_SHA"; do
+            [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "candidate SHA input is invalid" >&2; exit 1; }
+          done
+          [[ "$INPUT_FEED_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "feed lock input is invalid" >&2; exit 1; }
+          git merge-base --is-ancestor "$INPUT_BASE_SHA" "$SOURCE_SHA"
+          git merge-base --is-ancestor "$INPUT_UPSTREAM_SHA" "$SOURCE_SHA"
+          current_base="$(git rev-parse "refs/remotes/origin/${DEFAULT_BRANCH}^{commit}")"
+          [[ "$current_base" == "$INPUT_BASE_SHA" ]] || { echo "default branch advanced since candidate preparation" >&2; exit 1; }
+          python3 - "$SOURCE_SHA" "$INPUT_BASE_SHA" "$INPUT_UPSTREAM_SHA" "$INPUT_MERGE_BASE_SHA" "$WORKFLOW_SHA" "$SYNC_ID" <<'PY'
+          import json, subprocess, sys
+          source, base, upstream, merge_base, workflow, sync_id = sys.argv[1:]
+          candidate = json.loads(subprocess.check_output(['git', 'show', f'{source}:.github/upstream-candidate.json'], text=True))
+          expected = {'base_sha': base, 'upstream_sha': upstream, 'merge_base_sha': merge_base,
+                      'workflow_sha': workflow, 'sync_id': sync_id}
+          if any(candidate.get(key) != value for key, value in expected.items()):
+              raise SystemExit('candidate manifest differs from the dispatch inputs')
+          PY
+
+      - name: Check the exact ordinary pull request identity
+        if: inputs.pull_request != ''
+        run: |
+          set -euo pipefail
+          for sha in "$INPUT_PULL_HEAD_SHA" "$INPUT_PULL_BASE_SHA" "$INPUT_PULL_MERGE_SHA"; do
+            [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "pull request SHA input is invalid" >&2; exit 1; }
+          done
+          [[ "$SOURCE_SHA" == "$INPUT_PULL_MERGE_SHA" ]] || { echo "source differs from the dispatched PR merge SHA" >&2; exit 1; }
+          current_base="$(git rev-parse "refs/remotes/origin/${DEFAULT_BRANCH}^{commit}")"
+          [[ "$current_base" == "$INPUT_PULL_BASE_SHA" ]] || { echo "default branch advanced since PR dispatch" >&2; exit 1; }
+
+      - name: Check the repository fork contract
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+          python3 "$RUNNER_TEMP/verify-fork-contract.py" \
+            --root "$GITHUB_WORKSPACE" --mode source \
+            --source-ref "$SOURCE_SHA" --trusted-ref "$WORKFLOW_SHA" \
+            --output "$RUNNER_TEMP/fork-contract-source.json"
+
+      - name: Verify the feed lock digest
+        id: lock
+        run: |
+          set -euo pipefail
+          actual="$(python3 "$RUNNER_TEMP/feed-lock.py" digest --lock "$GITHUB_WORKSPACE/.github/feed-lock.json")"
+          if [[ -n "$INPUT_FEED_LOCK_SHA256" && "$actual" != "$INPUT_FEED_LOCK_SHA256" ]]; then
+            echo "source feed lock differs from dispatch input" >&2
+            exit 1
+          fi
+          echo "feed_lock_sha256=${actual}" >> "$GITHUB_OUTPUT"
+
+  build_openwrt:
+    name: build_openwrt
+    needs: validate_source
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      validation_artifact_name: ${{ steps.artifact.outputs.validation_name }}
+    env:
+      SOURCE_SHA: ${{ needs.validate_source.outputs.source_sha }}
+      SOURCE_SHORT_SHA: ${{ needs.validate_source.outputs.short_sha }}
+      FEED_LOCK_SHA256: ${{ needs.validate_source.outputs.feed_lock_sha256 }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      BUILD_REASON: ${{ inputs.build_reason || (inputs.sync_id != '' && 'upstream-sync') || (inputs.pull_request != '' && format('pull-request-{0}', inputs.pull_request)) || 'manual' }}
+      SYNC_ID: ${{ inputs.sync_id || '' }}
+      INPUT_BASE_SHA: ${{ inputs.base_sha || '' }}
+      INPUT_UPSTREAM_SHA: ${{ inputs.upstream_sha || '' }}
+      INPUT_MERGE_BASE_SHA: ${{ inputs.merge_base_sha || '' }}
+      PR_NUMBER: ${{ inputs.pull_request || '' }}
+      PR_HEAD_SHA: ${{ inputs.pull_head_sha || '' }}
+      PR_BASE_SHA: ${{ inputs.pull_base_sha || '' }}
+      PR_MERGE_SHA: ${{ inputs.pull_merge_sha || '' }}
+    steps:
+      - name: Checkout the validated source commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate_source.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch trusted build metadata helpers
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${WORKFLOW_SHA}^{commit}"; then
+            git fetch --no-tags origin "$WORKFLOW_SHA"
+          fi
+          git show "${WORKFLOW_SHA}:scripts/feed-lock.py" > "$RUNNER_TEMP/feed-lock.py"
+          git show "${WORKFLOW_SHA}:scripts/verify-fork-contract.py" > "$RUNNER_TEMP/verify-fork-contract.py"
+          git show "${WORKFLOW_SHA}:scripts/ci-build-metadata.py" > "$RUNNER_TEMP/ci-build-metadata.py"
+          git show "${WORKFLOW_SHA}:scripts/platform_impact.py" > "$RUNNER_TEMP/platform_impact.py"
+          git show "${WORKFLOW_SHA}:scripts/release-notes.py" > "$RUNNER_TEMP/release-notes.py"
+
+      - name: Space cleanup and initialize build environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -76,249 +230,281 @@ jobs:
           )
           if [[ "${#purge_packages[@]}" -gt 0 ]]; then
             sudo -E apt -y purge "${purge_packages[@]}"
-          else
-            echo "No matching preinstalled packages found for purge"
           fi
           sudo -E apt -y full-upgrade
-          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools python3-yaml qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           sudo -E systemctl daemon-reload
           sudo -E apt -y autoremove --purge
           sudo -E apt clean
           sudo -E timedatectl set-timezone "Asia/Shanghai"
 
-      - name: Update feeds and generate configuration file
-        run: ./scripts/apply-profile.sh "${PROFILE_NAME}" --sync-all-feeds
+      - name: Install locked feeds and apply the selected profile
+        run: ./scripts/apply-profile.sh "${PROFILE_NAME}" --locked-feeds
 
-      - name: Download packages
+      - name: Verify actual configuration, providers, feeds, and overlays
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/feed-lock.py" verify \
+            --root "$GITHUB_WORKSPACE" --lock .github/feed-lock.json \
+            --feeds-conf feeds.conf.default
+          python3 "$RUNNER_TEMP/verify-fork-contract.py" \
+            --root "$GITHUB_WORKSPACE" --mode build --config "$GITHUB_WORKSPACE/.config" \
+            --source-ref "$SOURCE_SHA" --trusted-ref "$WORKFLOW_SHA" \
+            --output "$RUNNER_TEMP/fork-contract-build.json"
+
+      - name: Download source packages
         run: make download -j16
 
       - name: Compile firmware
         run: |
-          make -j$(nproc) || make -j1 V=s
-          echo "======================="
-          echo "Space usage:"
-          echo "======================="
+          make -j"$(nproc)" || make -j1 V=s
           df -h
-          echo "======================="
           du -h --max-depth=1 ./ --exclude=build_dir --exclude=bin
           du -h --max-depth=1 ./build_dir
           du -h --max-depth=1 ./bin
 
-      - name: Prepare release assets
-        id: prepare_release
-        env:
-          BUILD_REASON: ${{ inputs.build_reason || 'manual' }}
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          SOURCE_SHORT_SHA: ${{ steps.source.outputs.short_sha }}
+      - name: Recheck locked inputs after the build
         run: |
           set -euo pipefail
+          python3 "$RUNNER_TEMP/feed-lock.py" verify \
+            --root "$GITHUB_WORKSPACE" --lock .github/feed-lock.json \
+            --feeds-conf feeds.conf.default
+          python3 "$RUNNER_TEMP/verify-fork-contract.py" \
+            --root "$GITHUB_WORKSPACE" --mode build --config "$GITHUB_WORKSPACE/.config" \
+            --source-ref "$SOURCE_SHA" --trusted-ref "$WORKFLOW_SHA"
 
-          build_reason="$BUILD_REASON"
+      - name: Prepare candidate and release artifacts
+        id: prepare_artifacts
+        run: |
+          set -euo pipefail
+          artifact_dir="$GITHUB_WORKSPACE/release-assets"
+          metadata_dir="$GITHUB_WORKSPACE/release-metadata"
+          notes_file="$GITHUB_WORKSPACE/release-notes.md"
           build_stamp="$(date -u +'%Y%m%d-%H%M%S')"
           build_date="$(date -u +'%Y-%m-%d %H:%M:%SZ')"
-          short_sha="$SOURCE_SHORT_SHA"
-          release_dir="${GITHUB_WORKSPACE}/release-assets"
-          metadata_dir="${GITHUB_WORKSPACE}/release-metadata"
-          notes_file="${GITHUB_WORKSPACE}/release-notes.md"
-          history_tag="${HISTORY_RELEASE_PREFIX}-${build_stamp}-${short_sha}"
-          history_name="Build ${build_stamp} (${short_sha})"
+          history_tag="${HISTORY_RELEASE_PREFIX}-${build_stamp}-${SOURCE_SHORT_SHA}"
+          mkdir -p "$artifact_dir" "$metadata_dir"
+          test -d ./bin/targets
+          test -d ./bin/packages
 
-          rm -rf "${release_dir}" "${metadata_dir}"
-          mkdir -p "${release_dir}" "${metadata_dir}"
-
-          if [[ ! -d ./bin/targets ]]; then
-            echo "bin/targets not found" >&2
-            exit 1
-          fi
-
-          if [[ ! -d ./bin/packages ]]; then
-            echo "bin/packages not found" >&2
-            exit 1
-          fi
-
-          firmware_archive="openwrt-${PROFILE_NAME}-firmware-${build_stamp}.tar.gz"
-          packages_archive="openwrt-${PROFILE_NAME}-packages-${build_stamp}.tar.gz"
-          buildinfo_archive="openwrt-${PROFILE_NAME}-buildinfo-${build_stamp}.tar.gz"
-          metadata_file="openwrt-${PROFILE_NAME}-metadata-${build_stamp}.txt"
-          checksum_file="openwrt-${PROFILE_NAME}-sha256sums-${build_stamp}.txt"
-
-          tar --exclude='targets/*/*/packages' -C ./bin -czf "${release_dir}/${firmware_archive}" targets
-          tar -C ./bin -czf "${release_dir}/${packages_archive}" packages
-
+          tar --exclude='targets/*/*/packages' -C ./bin -czf "$artifact_dir/openwrt-${PROFILE_NAME}-firmware-${build_stamp}.tar.gz" targets
+          tar -C ./bin -czf "$artifact_dir/openwrt-${PROFILE_NAME}-packages-${build_stamp}.tar.gz" packages
           while IFS= read -r -d '' file; do
-            install -D "${file}" "${metadata_dir}/${file#./bin/}"
+            install -D "$file" "$metadata_dir/${file#./bin/}"
           done < <(find ./bin/targets -type f \( -name '*.buildinfo' -o -name '*.manifest' -o -name 'sha256sums' \) -print0)
+          test -n "$(find "$metadata_dir" -type f -print -quit)"
+          tar -C "$metadata_dir" -czf "$artifact_dir/openwrt-${PROFILE_NAME}-buildinfo-${build_stamp}.tar.gz" .
 
-          if [[ -z "$(find "${metadata_dir}" -type f -print -quit)" ]]; then
-            echo "No build metadata files were produced" >&2
-            exit 1
+          cp .github/feed-lock.json "$artifact_dir/feed-lock.json"
+          cp .config "$artifact_dir/config.build"
+          ./scripts/diffconfig.sh > "$artifact_dir/config.diffconfig"
+          find ./bin/targets -type f -name '*.manifest' -print0 | sort -z | xargs -0 -r cat > "$artifact_dir/package-manifests.txt"
+          cp "$RUNNER_TEMP/fork-contract-build.json" "$artifact_dir/fork-contract.json"
+
+          metadata_args=(--root "$GITHUB_WORKSPACE" --workflow-sha "$WORKFLOW_SHA" \
+            --source-sha "$SOURCE_SHA" --feed-lock-sha256 "$FEED_LOCK_SHA256" \
+            --build-reason "$BUILD_REASON" --output "$artifact_dir/sync-validation.json")
+          if [[ -n "$SYNC_ID" ]]; then
+            metadata_args+=(--sync-id "$SYNC_ID" --base-sha "$INPUT_BASE_SHA" \
+              --upstream-sha "$INPUT_UPSTREAM_SHA" --merge-base-sha "$INPUT_MERGE_BASE_SHA")
           fi
+          if [[ -n "$PR_NUMBER" ]]; then
+            metadata_args+=(--pull-request "$PR_NUMBER" --pull-head-sha "$PR_HEAD_SHA" \
+              --pull-base-sha "$PR_BASE_SHA" --pull-merge-sha "$PR_MERGE_SHA")
+          fi
+          python3 "$RUNNER_TEMP/ci-build-metadata.py" "${metadata_args[@]}"
 
-          tar -C "${metadata_dir}" -czf "${release_dir}/${buildinfo_archive}" .
-
-          cat > "${release_dir}/${metadata_file}" <<EOF
+          cat > "$artifact_dir/openwrt-${PROFILE_NAME}-metadata-${build_stamp}.txt" <<EOF
           Repository: ${GITHUB_REPOSITORY}
-          Workflow: ${GITHUB_WORKFLOW}
-          Run ID: ${GITHUB_RUN_ID}
-          Run Attempt: ${GITHUB_RUN_ATTEMPT}
-          Workflow Ref: ${GITHUB_REF}
-          Workflow Commit: ${GITHUB_WORKFLOW_SHA}
+          Workflow: OpenWrt-CI
+          Workflow Commit: ${WORKFLOW_SHA}
           Dispatch Commit: ${GITHUB_SHA}
           Commit: ${SOURCE_SHA}
-          Short Commit: ${short_sha}
           Profile: ${PROFILE_NAME}
-          Build Reason: ${build_reason}
+          Build Reason: ${BUILD_REASON}
+          Feed Lock SHA-256: ${FEED_LOCK_SHA256}
+          Run ID: ${GITHUB_RUN_ID}
+          Run Attempt: ${GITHUB_RUN_ATTEMPT}
           Built At (UTC): ${build_date}
           EOF
-
           (
-            cd "${release_dir}"
-            sha256sum ./* > "${checksum_file}"
+            cd "$artifact_dir"
+            sha256sum ./* > "openwrt-${PROFILE_NAME}-sha256sums-${build_stamp}.txt"
           )
+          python3 "$RUNNER_TEMP/release-notes.py" \
+            --profile "$PROFILE_NAME" --commit "$SOURCE_SHA" \
+            --workflow-commit "$WORKFLOW_SHA" --feed-lock-sha256 "$FEED_LOCK_SHA256" \
+            --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --built-at "$build_date" --output "$notes_file"
+          echo "artifact_dir=${artifact_dir}" >> "$GITHUB_OUTPUT"
+          echo "history_tag=${history_tag}" >> "$GITHUB_OUTPUT"
+          echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
 
-          cat > "${notes_file}" <<EOF
-          Automated build for \`${PROFILE_NAME}\`.
-
-          - Repository: \`${GITHUB_REPOSITORY}\`
-          - Workflow ref: \`${GITHUB_REF}\`
-          - Workflow commit: \`${GITHUB_WORKFLOW_SHA}\`
-          - Dispatch commit: \`${GITHUB_SHA}\`
-          - Commit: \`${SOURCE_SHA}\`
-          - Short Commit: \`${short_sha}\`
-          - Build Reason: \`${build_reason}\`
-          - Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          - Built at (UTC): \`${build_date}\`
-          EOF
-
-          {
-            echo "build_stamp=${build_stamp}"
-            echo "history_tag=${history_tag}"
-            echo "history_name=${history_name}"
-            echo "release_dir=${release_dir}"
-            echo "notes_file=${notes_file}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Check release eligibility
-        id: release_gate
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          EXPECTED_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+      - name: Select attempt-specific artifact name
+        id: artifact
         run: |
           set -euo pipefail
+          identity="$SYNC_ID"
+          if [[ -z "$identity" && -n "$PR_NUMBER" ]]; then identity="pr-${PR_NUMBER}"; fi
+          if [[ -z "$identity" ]]; then identity="manual-${GITHUB_RUN_ID}"; fi
+          name="openwrt-${PROFILE_NAME}-${identity}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "validation_name=openwrt-${PROFILE_NAME}-${identity}-validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
-          if [[ "$GITHUB_REF" == "refs/heads/${DEFAULT_BRANCH}" ]]; then
-            git fetch --no-tags origin \
-              "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
-          fi
-          bash "$RUNNER_TEMP/ci-source-info.sh" >> "$GITHUB_OUTPUT"
-
-      - name: Upload candidate build artifacts
-        if: steps.release_gate.outputs.publish_release != 'true'
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: openwrt-${{ env.PROFILE_NAME }}-${{ steps.source.outputs.short_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.prepare_release.outputs.release_dir }}
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.prepare_artifacts.outputs.artifact_dir }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
+      - name: Upload small validation record
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.validation_name }}
+          path: |
+            release-assets/sync-validation.json
+            release-assets/feed-lock.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish_release:
+    name: Publish trusted default-branch build
+    needs: [validate_source, build_openwrt]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.sync_id == '' && inputs.pull_request == ''
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      SOURCE_SHA: ${{ needs.validate_source.outputs.source_sha }}
+      FEED_LOCK_SHA256: ${{ needs.validate_source.outputs.feed_lock_sha256 }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout the trusted publisher helper version
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .trusted-controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the artifact from this exact run
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.build_openwrt.outputs.artifact_name }}
+          path: release-assets
+
+      - name: Confirm source, lock, run, attempt, and current default branch
+        run: |
+          set -euo pipefail
+          current_default="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}" --jq '.commit.sha')"
+          [[ "$SOURCE_SHA" == "$current_default" ]] || { echo "default branch advanced while the build was running" >&2; exit 1; }
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]] || { echo "requested source differs from dispatch commit" >&2; exit 1; }
+          python3 - "$SOURCE_SHA" "$FEED_LOCK_SHA256" "$WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$PROFILE_NAME" <<'PY'
+          import hashlib, json, pathlib, sys
+          source, expected_lock, workflow, run_id, attempt, dispatch, repository, profile = sys.argv[1:]
+          root = pathlib.Path('release-assets')
+          metadata = json.loads((root / 'sync-validation.json').read_text())
+          lock = json.loads((root / 'feed-lock.json').read_text())
+          canonical = json.dumps(lock, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+          actual_lock = hashlib.sha256(canonical).hexdigest()
+          expected_revisions = [
+              {'name': feed.get('name'), 'revision': str(feed.get('revision', '')).lower()}
+              for feed in lock.get('feeds', [])
+          ]
+          checks = {
+              'source_sha': source,
+              'feed_lock_sha256': expected_lock,
+              'workflow_sha': workflow,
+              'dispatch_sha': dispatch,
+              'repository': repository,
+              'profile': profile,
+              'run_id': run_id,
+              'run_attempt': attempt,
+          }
+          for key, expected in checks.items():
+              if str(metadata.get(key)) != expected:
+                  raise SystemExit(f'build artifact {key} does not match the trusted dispatch')
+          if actual_lock != expected_lock:
+              raise SystemExit('build artifact feed lock digest differs')
+          if metadata.get('validation', {}).get('source_sha_match') is not True:
+              raise SystemExit('build artifact source SHA validation did not pass')
+          if metadata.get('validation', {}).get('feed_lock_match') is not True:
+              raise SystemExit('build artifact feed lock validation did not pass')
+          if metadata.get('feed_revisions') != expected_revisions:
+              raise SystemExit('actual feed revisions do not match the pinned feed lock')
+          if metadata.get('sync_id'):
+              raise SystemExit('candidate artifacts cannot enter the publisher')
+          checksum = next(root.glob('*-sha256sums-*.txt'))
+          import subprocess
+          subprocess.run(['sha256sum', '-c', checksum.name], cwd=root, check=True)
+          PY
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f ! -name '*-sha256sums-*' | sort)
+          test "${#assets[@]}" -gt 0
+          python3 .trusted-controller/scripts/release-notes.py \
+            --profile "$PROFILE_NAME" --commit "$SOURCE_SHA" \
+            --workflow-commit "$WORKFLOW_SHA" --feed-lock-sha256 "$FEED_LOCK_SHA256" \
+            --run-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --output release-notes.md
+          echo "SOURCE_SHA=${SOURCE_SHA}" >> "$GITHUB_ENV"
+
       - name: Publish history release
-        if: steps.release_gate.outputs.publish_release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
+          build_stamp="$(date -u +'%Y%m%d-%H%M%S')"
+          history_tag="${HISTORY_RELEASE_PREFIX}-${build_stamp}-${SOURCE_SHA:0:12}"
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f | sort)
+          gh release create "$history_tag" "${assets[@]}" \
+            --title "Build ${build_stamp} (${SOURCE_SHA:0:12})" \
+            --notes-file release-notes.md --target "$SOURCE_SHA" --latest=false
 
-          release_dir="${{ steps.prepare_release.outputs.release_dir }}"
-          notes_file="${{ steps.prepare_release.outputs.notes_file }}"
-          history_tag="${{ steps.prepare_release.outputs.history_tag }}"
-          history_name="${{ steps.prepare_release.outputs.history_name }}"
-
-          mapfile -t assets < <(find "${release_dir}" -maxdepth 1 -type f | sort)
-          if [[ "${#assets[@]}" -eq 0 ]]; then
-            echo "No release assets prepared" >&2
-            exit 1
-          fi
-
-          gh release create "${history_tag}" "${assets[@]}" \
-            --title "${history_name}" \
-            --notes-file "${notes_file}" \
-            --target "${SOURCE_SHA}" \
-            --latest=false
-
-      - name: Publish latest release
-        if: steps.release_gate.outputs.publish_release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+      - name: Update the latest release and tag
         run: |
           set -euo pipefail
-
-          release_dir="${{ steps.prepare_release.outputs.release_dir }}"
-          notes_file="${{ steps.prepare_release.outputs.notes_file }}"
-
-          mapfile -t assets < <(find "${release_dir}" -maxdepth 1 -type f | sort)
-          if [[ "${#assets[@]}" -eq 0 ]]; then
-            echo "No release assets prepared" >&2
-            exit 1
-          fi
-
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${assets[@]}"
-
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f | sort)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            git init --quiet release-tag
+            git -C release-tag remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+            git -C release-tag fetch --no-tags origin "$SOURCE_SHA"
+            git -C release-tag -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -f "$RELEASE_TAG" "$SOURCE_SHA"
+            gh auth setup-git
+            git -C release-tag push origin "refs/tags/${RELEASE_TAG}" --force
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
             declare -A keep_assets=()
             for asset_path in "${assets[@]}"; do
-              keep_assets["$(basename "${asset_path}")"]=1
+              keep_assets["$(basename "$asset_path")"]=1
             done
-
             while IFS= read -r asset_name; do
-              if [[ -z "${keep_assets[${asset_name}]:-}" ]]; then
-                gh release delete-asset "${RELEASE_TAG}" "${asset_name}" --yes
+              if [[ -n "$asset_name" && -z "${keep_assets[$asset_name]:-}" ]]; then
+                gh release delete-asset "$RELEASE_TAG" "$asset_name" --yes
               fi
-            done < <(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')
-
-            git tag -f "${RELEASE_TAG}" "${SOURCE_SHA}"
-            git push origin "refs/tags/${RELEASE_TAG}" --force
-
-            gh release edit "${RELEASE_TAG}" \
-              --title "${RELEASE_NAME}" \
-              --notes-file "${notes_file}" \
-              --latest
+            done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file release-notes.md --latest
           else
-            git tag -f "${RELEASE_TAG}" "${SOURCE_SHA}"
-            git push origin "refs/tags/${RELEASE_TAG}" --force
-
-            gh release create "${RELEASE_TAG}" "${assets[@]}" \
-              --title "${RELEASE_NAME}" \
-              --notes-file "${notes_file}" \
-              --verify-tag \
-              --latest
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$RELEASE_NAME" --notes-file release-notes.md \
+              --target "$SOURCE_SHA" --latest
           fi
 
-      - name: Delete history releases older than retention window
-        if: steps.release_gate.outputs.publish_release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Remove expired history releases
         run: |
           set -euo pipefail
-
           cutoff_epoch="$(date -u -d "${HISTORY_RETENTION_DAYS} days ago" +%s)"
-
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | [.tag_name, .created_at] | @tsv' |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | [.tag_name, .created_at] | @tsv' |
           while IFS=$'\t' read -r tag_name created_at; do
-            if [[ "${tag_name}" == "${RELEASE_TAG}" ]]; then
-              continue
-            fi
-
-            if [[ "${tag_name}" != "${HISTORY_RELEASE_PREFIX}-"* ]]; then
-              continue
-            fi
-
-            created_epoch="$(date -u -d "${created_at}" +%s)"
-            if (( created_epoch >= cutoff_epoch )); then
-              continue
-            fi
-
-            gh release delete "${tag_name}" --cleanup-tag --yes
+            [[ "$tag_name" == "$RELEASE_TAG" ]] && continue
+            [[ "$tag_name" == "${HISTORY_RELEASE_PREFIX}-"* ]] || continue
+            created_epoch="$(date -u -d "$created_at" +%s)"
+            (( created_epoch < cutoff_epoch )) || continue
+            gh release delete "$tag_name" --cleanup-tag --yes
           done

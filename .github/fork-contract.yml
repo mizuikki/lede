@@ -1,0 +1,130 @@
+schema_version: 1
+fork_features:
+  passwall_provider:
+    feeds_file: feeds.conf.default
+    ordered_before:
+      - passwall_packages
+      - passwall_luci
+    packages_provider:
+      luci-app-passwall: passwall_luci
+      sing-box: passwall_packages
+      xray-core: passwall_packages
+      chinadns-ng: passwall_packages
+    luci_branch: openwrt-25.12
+  x86_profile:
+    path: profiles/x86_64-passwall-docker.diffconfig
+    compare_every_diffconfig_value: true
+    required_selections:
+      target:
+        CONFIG_TARGET_x86: y
+        CONFIG_TARGET_x86_64: y
+        CONFIG_TARGET_x86_64_DEVICE_generic: y
+      passwall:
+        CONFIG_PACKAGE_luci-app-passwall: y
+        CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy: y
+        CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy: y
+        CONFIG_PACKAGE_sing-box: y
+        CONFIG_PACKAGE_xray-core: y
+      docker:
+        CONFIG_PACKAGE_cgroupfs-mount: y
+        CONFIG_PACKAGE_containerd: y
+        CONFIG_PACKAGE_docker: y
+        CONFIG_PACKAGE_docker-compose: y
+        CONFIG_PACKAGE_dockerd: y
+        CONFIG_PACKAGE_runc: y
+      firewall:
+        CONFIG_PACKAGE_firewall4: y
+        CONFIG_PACKAGE_iptables-mod-iprange: y
+        CONFIG_PACKAGE_iptables-mod-socket: y
+        CONFIG_PACKAGE_kmod-nft-core: y
+        CONFIG_PACKAGE_kmod-nft-nat: y
+      proxy:
+        CONFIG_PACKAGE_chinadns-ng: y
+        CONFIG_PACKAGE_dns2socks: y
+        CONFIG_PACKAGE_geoview: y
+        CONFIG_PACKAGE_haproxy: y
+        CONFIG_PACKAGE_ipt2socks: y
+      storage:
+        CONFIG_PACKAGE_btrfs-progs: y
+        CONFIG_PACKAGE_kmod-fs-btrfs: y
+        CONFIG_PACKAGE_lsblk: y
+        CONFIG_PACKAGE_luci-app-diskman: y
+        CONFIG_PACKAGE_parted: y
+    forbidden_symbols:
+      - CONFIG_PACKAGE_trojan-plus
+  network_defaults:
+    lan_config_files:
+      - package/base-files/files/bin/config_generate
+      - package/base-files/luci/bin/config_generate
+    lan_address: 192.168.5.1
+    dhcp_file: package/network/services/dnsmasq/files/dhcp.conf
+    dhcp_start: "110"
+    dhcp_limit: "145"
+  perl_override:
+    helper: scripts/sync-official-perl.sh
+    lock_revision_required: true
+    destination: feeds/packages/lang/perl
+  dockerd_overlay:
+    source_patch: patches/dockerd/100-skip-host-nested-binaries.patch
+    staged_patch: feeds/packages/utils/dockerd/patches/999-openwrt-skip-host-nested-binaries.patch
+    package_makefile: feeds/packages/utils/dockerd/Makefile
+    package_name: dockerd
+  airoha_history:
+    required_files:
+      - package/boot/uboot-airoha/Makefile
+      - target/linux/airoha/image/an7581.mk
+      - target/linux/airoha/an7581/base-files/lib/upgrade/platform.sh
+      - target/linux/airoha/an7581/base-files/etc/init.d/airoha_fan
+      - target/linux/airoha/dts/an7581-w1700k-ubi.dts
+      - target/linux/airoha/dts/an7581-nokia_xg-040g-md-ubi.dts
+    required_tokens:
+      package/boot/uboot-airoha/Makefile:
+        - an7581_gemtek_w1700k
+        - an7581_nokia_xg-040g-md
+      target/linux/airoha/image/an7581.mk:
+        - gemtek_w1700k-ubi
+        - nokia_xg-040g-md-ubi
+        - KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+      target/linux/airoha/an7581/base-files/lib/upgrade/platform.sh:
+        - gemtek,w1700k-ubi
+        - nokia,xg-040g-md-ubi
+      target/linux/airoha/an7581/base-files/etc/init.d/airoha_fan:
+        - gemtek,w1700k-ubi
+  qualcomm_history:
+    image_file: target/linux/qualcommax/image/ipq60xx.mk
+    emmc_template:
+      - "IMAGES += factory.bin"
+      - "pad-to 6144k"
+      - "IMAGE/sysupgrade.bin/squashfs :="
+    forbidden_emmc_images:
+      - recovery.bin
+    required_devices:
+      - anysafe_e1
+      - zn_m2
+      - jdcloud_re-cs-02
+      - jdcloud_re-cs-07
+      - jdcloud_re-ss-01
+      - link_nn6000-v1
+      - link_nn6000-v2
+      - philips_ly1800
+      - redmi_ax5-jdcloud
+    other_required_files:
+      - package/firmware/ipq-wifi/src/board-anysafe_e1.qcn9074
+      - target/linux/qualcommax/ipq60xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+      - target/linux/qualcommax/ipq60xx/base-files/lib/upgrade/platform.sh
+  an7583_config:
+    path: target/linux/airoha/an7583/config-6.18
+    required:
+      CONFIG_CRYPTO_HW: y
+  rockchip_backports:
+    paths:
+      - target/linux/rockchip/patches-6.18
+    required_files:
+      - target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3568-rock-3b.dts
+    required_patch_tokens:
+      target/linux/rockchip/patches-6.18/113-ethernet-stmicro-stmmac-Add-SGMII-QSGMII-support.patch:
+        - SGMII
+        - QSGMII
+  source_provenance:
+    helper: scripts/ci-source-info.sh
+    candidate_workflow: .github/workflows/openwrt-ci.yml

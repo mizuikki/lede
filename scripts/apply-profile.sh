@@ -13,6 +13,7 @@ Options:
   --no-update-passwall  Skip updating feeds
   --install-passwall    Run feeds install for Passwall feeds after update
   --sync-all-feeds      Run scripts/sync-feeds.sh (update+install all feeds) before applying
+  --locked-feeds        Install feeds from .github/feed-lock.json before applying
   --force-feeds         Force-update feeds (passes --force to update-passwall.sh)
   --defconfig-only      Apply profile + make defconfig, no feed updates
   -h, --help            Show this help
@@ -23,6 +24,7 @@ Examples:
   scripts/apply-profile.sh x86_64-passwall-docker --force-feeds
   scripts/apply-profile.sh x86_64-passwall-docker --install-passwall
   scripts/apply-profile.sh x86_64-passwall-docker --sync-all-feeds
+  scripts/apply-profile.sh x86_64-passwall-docker --locked-feeds
 EOF
 }
 
@@ -55,6 +57,7 @@ install_passwall=0
 install_passwall_set=0
 sync_all_feeds=0
 force_feeds=0
+locked_feeds=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --no-update-passwall) update_passwall=0; shift ;;
     --install-passwall) install_passwall=1; install_passwall_set=1; shift ;;
     --sync-all-feeds) sync_all_feeds=1; shift ;;
+    --locked-feeds) locked_feeds=1; update_passwall=0; install_passwall=0; shift ;;
     --force-feeds) force_feeds=1; shift ;;
     --defconfig-only) update_passwall=0; install_passwall=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -73,10 +77,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$locked_feeds" -eq 1 && ( "$sync_all_feeds" -eq 1 || "$force_feeds" -eq 1 ) ]]; then
+  echo "Error: --locked-feeds cannot be combined with --sync-all-feeds or --force-feeds" >&2
+  exit 2
+fi
+
 # Auto-enable feeds install on fresh checkouts where package/feeds links are
 # missing. Without this, Kconfig may not "see" feed packages and profile
 # options can be ignored.
-if [[ "$install_passwall_set" -eq 0 ]]; then
+if [[ "$install_passwall_set" -eq 0 && "$locked_feeds" -eq 0 ]]; then
   if [[ ! -d package/feeds/passwall_packages || ! -d package/feeds/passwall_luci ]]; then
     install_passwall=1
   fi
@@ -88,7 +97,10 @@ if ! grep -q '^CONFIG_TARGET_' "$profile_path"; then
   exit 1
 fi
 
-if [[ "$sync_all_feeds" -eq 1 ]]; then
+if [[ "$locked_feeds" -eq 1 ]]; then
+  echo "[0/4] Installing locked feeds and overlays"
+  scripts/sync-feeds.sh --locked
+elif [[ "$sync_all_feeds" -eq 1 ]]; then
   if [[ ! -x scripts/sync-feeds.sh ]]; then
     echo "Error: scripts/sync-feeds.sh not found or not executable" >&2
     exit 1

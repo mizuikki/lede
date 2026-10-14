@@ -1,389 +1,354 @@
-# 上游同步与候选构建
+# 上游同步实施与部署
 
-本文记录本 fork 的修复边界、已经实现的候选构建行为，以及基于
-2026-10-14 仓库探索整理的 `Sync-Upstream` 替代方案。推荐保留 Git merge
-历史，将同步改为“候选分支、功能检查、精确 SHA 构建、人工合入、默认分支
-发布”。本文是实施设计，当前没有切换工作流或更改远端设置。
+本方案已在仓库内实现，默认只允许人工启动；没有配置 `schedule`。本轮没有
+推送候选、创建 PR、运行 GitHub workflow 或改仓库规则。固件构建与发布仍须在
+部署阶段验证。
 
-## 仓库探索结果
+## 基线与最新核对
 
-本次核对了两个工作流、profile、feeds 与构建 helper、fork 的有效树差异、
-合并历史、远端权限和 Actions 日志。快照如下；数量只代表此次快照。
+设计基线为 `8ea4ab1af9c40e5e68bfab5bc89f4c7cf71feb1e`。2026-10-14 对远端
+只读复核得到下表；这些 SHA 是本次经验证的初始化状态，不是以后运行时写死的
+同步目标。每次运行都重新读取 fork 和 upstream 的当前默认分支，再固定完整
+提交 SHA。
 
-| 对象 | 检查结果 |
+| 项目 | 本轮复核值 |
 | --- | --- |
-| fork 默认分支 `B` | `master`，`2abb33d9b48e615081b64b35ef2b4f78b68bd6f2` |
-| 上游 `U` | `coolsnowwolf/lede:master`，`dcafc376a688efb0887b661b3a98a4c41a725984`；提交日期 2026-10-13 UTC |
-| 共同祖先 `M` | `241650a12c1121c76ba6e82567f3cbd81e368d3d`，也是当前 fork HEAD 的第二父提交 |
-| 历史分叉 | `B...U` 左侧 67、右侧 42 个提交；左侧包括历史导入，不能当成 67 个独立定制补丁 |
-| 有效 fork 差异 `M → B` | 126 个文件，包括 package 52、target 55、scripts 8；不能只保护 workflows 与 profile |
-| 当前正式构建 | `x86_64-passwall-docker`，x86 默认 kernel 6.18；没有 ARM 设备构建矩阵 |
-| 最近正式构建 | [run 36071742062](https://github.com/mizuikki/lede/actions/runs/36071742062) 成功，源码是当前 `B` |
-| 默认分支约束 | 没有 classic branch protection，仓库 rulesets 列表为空；merge、squash、rebase 均允许 |
-| Actions 默认权限 | `write`；后续工作流需自行收紧。API 返回的 `can_approve_pull_request_reviews=false` 是机器人审批设置，不足以证明机器人创建 PR 的能力 |
+| fork 默认分支 | `master`，`2abb33d9b48e615081b64b35ef2b4f78b68bd6f2` |
+| upstream | `coolsnowwolf/lede:master`，`dcafc376a688efb0887b661b3a98a4c41a725984` |
+| 唯一 merge-base | `241650a12c1121c76ba6e82567f3cbd81e368d3d` |
+| `B...U` 提交数 | fork 侧 67，上游侧 42；fork 侧包含历史导入，不等于独立定制补丁数 |
+| 有效树差异 `M→B` | 126 个文件；包含 package、target、脚本和构建配置 |
+| 冲突 | `target/linux/qualcommax/image/ipq60xx.mk` 中 `Device/EmmcImage` |
+| 远端规则 | 默认分支 `master`；当时没有 classic protection，rulesets 列表为空 |
+| 合并方式 | merge、squash、rebase 当时都允许；部署前仍需设置为只允许 merge |
+| Actions 设置 | 仓库默认 token 权限为 write；工作流已逐 job 限权 |
 
-现有 `.github/workflows/sync-upstream.yml` 先把上游合入并推送 `master`，再
-dispatch 固件构建。因此即使合并没有文本冲突，编译或功能回归也只能在
-默认分支已经变化后发现。
+`.github/upstream-state.json` 初始化记录已确认的共同历史点 `M` 和已复核的
+fork 基线 `B`。后续候选合入后，state 随候选配置提交更新；同步程序仍会检查
+旧 upstream SHA 和旧 fork base 都是新历史的祖先，并要求恰好一个 merge-base。
+遇到重写、倒退或多 merge-base 会停止并生成 `history_review_required` 报告。
 
-### 当前冲突的具体来源
+最新 EmmcImage 冲突报告包含 merge-base、fork base 和 upstream 三侧 blob ID。
+fork 当前模板只声明 `factory.bin`、padding 为 6144k，并保留 sysupgrade 规则；
+upstream 在迁移 Qualcomm DTS 时新增 `recovery.bin` 声明。冲突解决必须保留上游
+DTS 迁移和其他设备变更，再按设备实际镜像路径逐项审查模板。禁止整文件采用
+ours/theirs。相关设备包括 AnySafe E1、ZN M2、JDCloud RE-CS-02/07、RE-SS-01、
+Link NN6000 v1/v2、Philips LY1800、Redmi AX5 JDCloud。
 
-对最新 `B/U` 执行 `git merge-tree --write-tree`，在不修改工作树的情况下
-复现了唯一的文本冲突：`target/linux/qualcommax/image/ipq60xx.mk`。
+## 已实现的行为
 
-上游 [e663ca9b4](https://github.com/coolsnowwolf/lede/commit/e663ca9b4cd74dbaa5cdd54bfa54baf876deb69f)
-迁移 Qualcomm DTS 目录时，也调整了 `Device/EmmcImage`：factory padding
-从 12288k 改为 6144k、删除 recovery 的生成规则，但 `IMAGES` 中仍声明
-`recovery.bin`。fork 的历史导入
-[2bddcb5fa](https://github.com/mizuikki/lede/commit/2bddcb5fae3e2e9b0994cde0fb42db816e808193)
-已经改为仅声明 `factory.bin`、padding 6144k，两边因此在同一模板冲突。
+### 状态、候选和历史
 
-候选处理应保留 upstream 的 DTS 迁移和其他新增兼容声明，按设备实际镜像
-需求审查 EmmcImage，而不能整文件选 ours/theirs。还要检查 Philips、AnySafe、
-ZN 等设备的 image、DTS、caldata 和升级路径。x86 CI 成功不能验证这些路径。
-这里记录的是冲突处理依据，尚未解决冲突或验证设备镜像。
+- `scripts/upstream-sync.py` 每次固定 `B`、`U`、`W`，验证上游仓库/分支、历史
+  单调性和唯一 merge-base。报告包含 `M→B`、`M→U`、`B→C`、`U→C` 文件数、
+  加删行数和路径；冲突报告包含三侧 blob ID 与复现命令。
+- 若 `U` 已是 `B` 的祖先，结果是 `no_updates`，不推分支、不建 PR、不启动构建。
+- 无冲突时生成两提交候选：先是父链为 `B`,`U` 的 merge commit，再提交 state、
+  feeds lock 和候选 manifest。人工冲突解决通过 `register` 验证相同父链后登记。
+- 分支和 `sync_id` 使用 `B12-U12-W12`：
+  `sync/upstream-<B12>-<U12>-w<W12>`。manifest 仍保存完整 SHA；缩写碰撞或
+  旧候选身份不匹配时会停止，保留旧分支，不覆盖或强推。
+- controller 先查找唯一开放的 `sync/upstream-*` PR，再读取 manifest 中固定的
+  `B/U/W`。没有候选时，`candidate_branch` 只表示计划分支；只有 `ls-remote`
+  确认且 fetch 成功后才输出非空 `candidate_ref` 并传给 prepare helper。`register`
+  同样要求这个已 fetch 的候选引用。即使上游 `U` 已前进，仍可按旧候选身份报告、
+  验证和重试，不会因为上游每次前进就另建候选 PR。若默认分支 `B` 前进，旧候选报告为
+  `candidate_expired`；仅非 report、非 dry-run 的 prepare/register 才将旧 `C` 的
+  `upstream/ready` 置为 failure。report 与 dry-run 只生成本地报告和 Actions artifact，
+  不写 status、分支、tag、PR、workflow dispatch 或 release。过期候选的构建与人工
+  证据失效。维护者关闭过期 PR 后，须再次显式运行 `prepare` 才会准备替代候选。
+- `report` 不刷新 lock；`prepare` 对已有候选复用原 lock。新候选只在首次准备
+  时生成 lock，人工 `register` 也只在首次登记时生成。重试不会追随 feed tip。
+- 候选修改后会以新的实际 HEAD 重新验证。`B` 前进后旧候选身份不匹配，需要
+  新候选；不能沿用旧状态。重复触发会复用同身份的活动 build，已有成功状态且
+  artifact 未过期时也复用；已完成但无可复用结果时要求显式 `retry_build`。
+  真正创建新 dispatch 前，controller 先把候选 `upstream/ready` 设为 pending，
+  防止旧成功状态在重试或 artifact 过期期间继续放行。
+- 目前没有 schedule，因此 controller 只会在非 dry-run 的人工
+  `workflow_dispatch` 下推候选分支、建 draft PR 和 dispatch build；从不写
+  `master` 或强推候选。
 
-## 修复边界
-
-本 fork 修复自己的配置、构建和发布逻辑。当前上游缺陷与历史同步导入的
-上游缺陷继续跟踪，等待上游解决，不在本 fork 增加 driver 或升级框架补丁。
-
-| 项目 | 当前处理 |
-| --- | --- |
-| Airoha reset 未初始化变量、YT921x RX 所有权、Nokia stock 环境 helper | 保留上游实现，跟踪上游修复 |
-| 历史导入的 Airoha FIT 升级调用、Gemtek 默认 U-Boot 命令 | 保留现状，等待对应上游实现修复 |
-| Gemtek PCIe x2 与新 API 的等价性、binding | 继续记录待验证；本轮没有加入寄存器 workaround |
-| AN7583 默认 EIP93 选择 | 补齐 fork 配置需要的 `CONFIG_CRYPTO_HW`，不修改 driver |
-| profile 中已经不存在的 `trojan-plus` 选择 | 删除失效的 fork 配置项，不恢复上游已删除的 package |
-| 指定源码 SHA 的候选构建和发布归属 | 使用实际 checkout SHA；候选构建上传 Actions artifacts |
-
-上游问题按审查过的 `8e6869b60` 和后续远端快照 `f820e495d` 登记：Airoha
-reset／Nokia helper 来自 `351ec9813`，YT921x 来自 `14590b681`，历史导入项
-来自 `18ce6f116`。后续跟踪上游修复提交，不在本 fork 维护这些修复的副本。
-
-fork 修复验收和上游问题跟踪分开；已经明确延期的上游缺陷继续登记。完整
-x86 CI 的结论仅适用于该 profile，受影响的 Airoha、Rockchip 硬件行为仍需在
-上游修复后验证，不能写成“已通过实机验证”。
-
-## 已实现的 OpenWrt-CI 行为
-
-工作流仍由 `workflow_dispatch` 触发，`source_sha` 接受完整的 40 位 commit
-SHA。留空时使用 dispatch ref 对应的事件 SHA，checkout 不依赖执行期间可能
-移动的分支名。
-
-源码校验 helper 从 `github.workflow_sha` 对应的提交取出，保存到 runner 临时
-目录。这样也可以验证尚未包含该 helper 的历史源码提交。helper 不修改 Git
-引用，检查 HEAD 与请求的 SHA 一致，并输出完整 SHA 和 12 位短 SHA。
-
-固件 metadata 和 release target 使用实际源码 SHA，同时单独记录 workflow
-commit、dispatch commit 和 workflow ref。
-
-只有同时满足以下条件才发布 history/latest release 或清理历史 release：
-
-1. workflow 是从仓库默认分支 dispatch 的；
-2. 构建完成、发布前重新 fetch 默认分支后，实际源码 SHA 仍等于它的 HEAD。
-
-候选分支、tag、历史 SHA，以及构建期间默认分支已经前进的运行，均保留为
-Actions artifacts，保留期为 14 天，不执行 release 或 tag 写入。
-
-### 校验 reconciliation 候选
-
-先将修复后的候选提交发布到候选分支，再选择该分支上的工作流版本运行。
-默认分支尚未包含工作流修复时，必须使用包含修复的候选 workflow ref。
+手动冲突解决先在隔离目录固定 `B/U`，以 `B` 为第一父提交创建 merge，再逐个
+审查冲突 hunk：
 
 ```sh
-gh workflow run openwrt-ci.yml \
-  --ref sync/upstream-reconcile \
-  -f source_sha="$(git rev-parse sync/upstream-reconcile)" \
-  -f build_reason=reconciliation-review
+B=YOUR_FULL_BASE_SHA
+U=YOUR_FULL_UPSTREAM_SHA
+W=YOUR_FULL_WORKFLOW_SHA
+CANDIDATE_BRANCH="sync/upstream-${B:0:12}-${U:0:12}-w${W:0:12}"
+git checkout --detach "$B"
+git merge --no-commit --no-ff "$U"
+# 手工审查并编辑冲突；不要整文件采用 ours/theirs
+git add path/to/reviewed-file
+git commit -m "Merge upstream candidate"
+git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
 ```
 
-运行时必须核对 checkout SHA、构建结果和 artifact metadata 中的 `Commit`。
-GitHub 的 `GITHUB_SHA` 标识 dispatch ref 的提交，不能替代用户请求的源码 SHA。
+随后从默认分支人工启动 `Sync-Upstream`，选择 `register` 并传入该候选分支。
+程序验证 merge 父链和文件状态，生成 lock/state/manifest 的登记提交；候选 PR
+和构建仍由 controller 完成。
 
-### 本地回归验证
+### fork contract 与功能边界
 
-需要 Python 3、PyYAML、Git 和 Bash：
+`.github/fork-contract.yml` 和 `scripts/verify-fork-contract.py` 检查：
+
+- Passwall feed 顺序、LuCI 分支，以及安装后的 provider symlink；
+- x86 profile 中每个 diffconfig 值是否在实际 `.config` 中保留；失去 target
+  选择或把禁止的 `trojan-plus` 设为 y/m 都会失败；
+- contract 自身固定必需的 target、Passwall/transproxy、Docker、firewall、代理和
+  存储选择；候选 profile 与生成 `.config` 分别对照可信 contract，二者同时删掉
+  选择也会失败。配置迁移须先审查并显式更新 contract；
+- LAN 默认值 `192.168.5.1`、DHCP start/limit `110/145`；
+- 官方 Perl overlay 和 dockerd patch 的锁定摘要；
+- Airoha、Qualcomm、Rockchip 设备路径/关键字段、AN7583 `CONFIG_CRYPTO_HW`，
+  以及 Qualcomm EmmcImage 与设备清单。
+- 候选中的 workflow 仍保留 read-only/artifact-only build、显式 source check 和
+  独立 default-branch publisher；controller 的 push 只能指向候选分支。候选若
+  改动发布权限边界或 master 写入路径会失败。
+
+contract 提供可自动核对的保护项，不替代对全部 126 个有效树差异的人工语义
+审查。保留历史导入设备功能；上游已有缺陷继续按本仓库既定边界跟踪，不借
+同步增加 driver workaround 或升级 kernel/backport patch。x86 CI 不能证明设备
+镜像、升级、校准或实机网络行为正确。
+
+### feeds lock 与构建输入
+
+`.github/feed-lock.json` 记录所有启用 feed 的 URL、配置分支、顺序和完整 SHA，
+并固定官方 Perl 的完整 revision、目录 tree 和内容摘要，以及 dockerd patch 的
+SHA-256。候选的 manifest 保存 lock 摘要。`scripts/feed-lock.py` 可创建、物化、
+校验和计算 lock 摘要。
+
+`scripts/sync-feeds.sh --locked` 临时生成 `feeds.conf` 并按锁安装 feeds，再以
+锁定 Perl revision 覆盖 packages feed、staging dockerd patch、安装 feed packages，
+最后检查所有 feed HEAD、Perl 内容、补丁内容和 packages feed 非预期改动。它拒绝
+覆盖现有 `feeds.conf`。`apply-profile.sh --locked-feeds` 先执行锁定安装再展开
+profile；`make` 重试使用已安装的同一输入，不刷新 feed 或 lock。
+
+构建在开始和结束时核对 lock 与 fork contract。artifact 保存 lock、实际 feed
+revision、`.config`、diffconfig、package manifest、buildinfo、checksums、contract
+结果和 `sync-validation.json`。另外单独上传仅含 validation JSON 与 lock 的小型
+artifact，供状态汇总读取；汇总器不下载/解压固件大包。这样锁定源码输入，不承诺
+工具链环境或全部下载源字节级可复现。汇总需要大构建 artifact 与小验证 artifact
+都仍有效；任一过期都会阻止 ready。
+
+### Actions 版本和异步结果
+
+`Sync-Upstream` 只允许 `workflow_dispatch`。它将当前可信 controller SHA `W`
+写入 `ci/sync-control-<W12>` 固定 tag，并显式 dispatch `openwrt-ci.yml`，
+传递候选 `C`、`B/U/M`、lock 摘要和 `sync_id`。代码固定 REST API 版本
+`2026-03-10`，要求 dispatch 响应包含 `workflow_run_id`，随后核对 workflow ID、
+event、tag ref、head SHA、run title、source SHA 和 attempt。没有 ID、身份不符、
+错误 attempt 或重复活动 run 不会退化为寻找“最近一次运行”。
+
+候选 `pull_request` 预览构建被跳过，不会写 `upstream/ready`。普通 PR 也不直接由
+PR 自带的 workflow 构建：`pr-build-dispatch.yml` 在 `pull_request_target` 的可信
+base 版本中运行，只读取 PR 的精确 head/base/merge SHA，不 checkout 或执行 PR
+代码；它校验当前 PR 和默认分支后，将只读构建 dispatch 到固定的
+`ci/sync-control-<W12>` tag。构建使用 PR merge SHA，GITHUB_TOKEN 只有 contents
+read。PR 即使修改或删除编译 workflow 中的步骤，也不能改动这次已固定的控制版本。
+
+PR 汇总器另外读取 GitHub API 中 base 与 merge commit 对应的
+`.github/workflows/openwrt-ci.yml` blob，要求完全相同；并要求 PR merge commit 的
+父提交顺序严格为 `[base, head]`。artifact metadata 的 workflow SHA 必须等于 PR
+base SHA，dispatch run 的 ref/head SHA 必须对应同一个 `W`，metadata 中的 PR
+number/head/base/merge SHA 还须与当前 GitHub PR 完全一致。仅有 workflow ID、job
+名称、artifact 自报值或 PR 的 `github.workflow_sha` 都不能建立信任。候选 PR 也
+只接受显式 dispatch 的固定控制版本；候选的 `upstream/ready` 写在实际候选 HEAD。
+
+`sync-result.yml` 在 `workflow_run: completed` 和 PR 评论变更后从默认分支运行可信
+汇总程序，读取精确 run/attempt 的 jobs 和 artifact，核对候选当前 HEAD、PR
+head/base/merge SHA、当前默认分支、候选 manifest、feed lock 和实际 feed revisions。
+`validate_source`、`build_openwrt` 必须都为 success；skipped、失败、run/attempt
+不匹配、artifact 缺失/过期、候选被改或默认分支前进都不能通过。汇总器只在当前
+默认分支 workflow 中运行，写 status 的 token 不用于执行 PR 代码。
+
+实际差异按固定 `B/U/C`（普通 PR 使用精确 base/merge）送入
+`scripts/platform_impact.py`，生成平台必需检查计划。当前映射为：Qualcomm IPQ60xx
+要求 `image_build`、`dts_review`、`upgrade_review`；Airoha AN758x 要求
+`image_build`、`upgrade_review`、`device_review`；Rockchip RK3568 要求
+`target_build`、`sgmii_qsgmii_review`。通用 kernel/target/toolchain 路径按全部平台
+处理。`validate_source` 和 x86 构建成功不替代这些验证。每项证据都须通过 PR
+评论中的 `upstream-sync-evidence` JSON marker 绑定到当前候选 SHA，并由非 PR
+作者、针对当前 head SHA 的最新 APPROVED review 提交；证据包含结果、HTTPS URL
+和 SHA-256。缺少证据保持 pending，失败证据使状态失败；候选 SHA 或 PR head 改变
+后旧证据不能复用。评论被编辑或删除时会重新聚合。汇总器检查 URL 与摘要格式，
+不下载证据文件；证据内容仍由 reviewer 审核。先对当前 HEAD 提交 APPROVED review，
+再发布或编辑证据评论，以触发可信汇总器重新计算。每次评论重算会先把当前目标
+status 设为 pending，因此 API/证据读取失败也不会留下旧 success。例如：
+
+```text
+<!-- upstream-sync-evidence:{"candidate_sha":"<full SHA>","platform":"qualcomm_ipq60xx","check":"image_build","result":"pass","evidence_url":"https://example.invalid/evidence","sha256":"<64 hex SHA-256>"} -->
+```
+
+候选 PR 查询使用 REST `GET /repos/{owner}/{repo}/pulls` 的 `head=owner:branch`
+过滤器（不是 `owner/repo:branch`），并进行 URL 编码。汇总器要求唯一结果的
+`head.ref` 等于完整 `sync/<sync_id>`、`head.repo.full_name` 等于当前仓库、`head.sha`
+是完整 40 位 SHA 且等于 controller run-name 中的 source SHA；随后校验 PR base 与
+manifest 固定的 `B`、manifest 中完整的 `B/U/W` 和精确 run-name。fork PR、错误或缩短
+SHA、重复 PR、模糊标题都不能被当成候选。评论触发聚合使用同一 branch、repo、SHA、
+manifest 和 run-name 规则；缺少平台证据时保持 pending。
+
+成功/失败/pending 写在实际候选 commit 或普通 PR merge commit 的
+`upstream/ready` status context。普通 PR 不要求修改 upstream state。
+同一 run 的 attempt 汇总串行处理；若旧 attempt 的 webhook 晚于新 attempt 到达，
+旧结果以 neutral 忽略，不写 status。若同一候选有更新的独立 run，或同一 PR 有
+更新的构建 run，旧 run 也以 neutral 忽略，避免较晚到达的旧 webhook 覆盖新结果。
+
+workflow dispatch REST API 在本轮采用的官方版本 `2026-03-10` 返回
+`workflow_run_id`（HTTP 200 JSON）；代码不再实现旧版空 204 响应的“找最新 run”
+兜底。这是根据 REST 文档确认的版本契约，不是未验证的行为假设。
+
+### 构建和发布隔离
+
+`.github/workflows/openwrt-ci.yml` 的 `validate_source` 与 `build_openwrt` 权限
+为只读；checkout 关闭持久凭据，构建只上传 14 天 artifact。候选 artifact 永不
+进入 publisher。
+
+独立 `publish_release` 仅能从默认分支 `workflow_dispatch` 且没有 `sync_id` 时
+运行。它下载本次 run 的 artifact，核对源码 SHA 等于 dispatch SHA 和发布前重新
+读取的当前默认分支 HEAD，检查 workflow/source/run/attempt/profile/lock metadata
+与 checksums 后才写 history/latest release。默认分支构建 SHA 前进后会拒绝发布。
+
+## 本地验证
+
+本地回归测试以临时 Git 仓库和模拟 GitHub CLI/API 覆盖无更新、正常
+merge、EmmcImage 三侧冲突、上游历史改写、多 merge-base、候选修改、base 前进、
+手工冲突登记与重复复用、feeds/overlay staged/unstaged/untracked 漂移、profile 与
+生成配置同时丢失必需选择、PR workflow blob 被替换或删除、任意 W/伪造 metadata、
+受影响平台证据缺失与候选 SHA 变化、错误 run/attempt、skipped job、artifact
+过期、release notes 中的反引号/美元符号/换行，以及发布写权限隔离。
+
+执行：
 
 ```sh
 python3 -B -m unittest discover -s scripts/tests -v
 ```
 
-测试使用临时 Git 仓库，覆盖 merge commit、候选分支、历史 SHA、默认分支
-在构建期间前进、checkout 不符，以及产物 metadata 的来源。它们不会推送
-远端或执行固件编译。
+测试不访问 GitHub、不推送、不运行固件构建，也不安装真实 feeds。上线前仍需手动
+验证 GitHub 的 `pull_request_target`、`workflow_dispatch`、`workflow_run` 与
+`issue_comment` payload、status 在 PR 页面显示方式、PR 审批策略和真实 artifact
+下载/API 权限。
 
-## 后续 Sync-Upstream 设计
+## 部署步骤
 
-### 选择与边界
+### 1. 部署实现并设置仓库权限
 
-采用保留双亲历史的 merge，同步工作流只准备候选和验证报告。保留现有
-profile、候选 artifact 和 history/latest 发布行为。暂不采用“重置到上游
-再重放全部补丁”：本 fork 含设备、bootloader、升级路径及历史 backport，
-尚未形成可完整重放的定制补丁集，这样切换会扩大首轮迁移风险。
+审查本实现后通过正常 PR/merge 将工作流和 helpers 放到 `master`。合入这次实现
+属于部署，不要在本地执行远端 push 或 merge。
 
-同步 PR 必须用 merge commit 合入，不能 squash/rebase。否则上游 `U` 可能
-不再是默认分支的祖先，下次同步会再次导入相同历史。首次上线先完成功能
-清单和冲突候选验证，不将“Git 可以合并”作为功能保留的依据。
+在 Settings → Actions → General：
 
-```mermaid
-flowchart LR
-    A[固定 B / U / M] --> B[候选分支 merge]
-    B -->|冲突| H[保存报告 / 人工解决]
-    H --> C[锁定候选 C 与 feeds L]
-    B -->|无冲突| C
-    C --> D[功能检查 / x86 CI / 受影响平台验证]
-    D --> E[核对 B / C / L 与运行结果]
-    E -->|base 或 candidate 变化| A
-    E -->|验证通过| F[人工 merge PR]
-    F --> G[构建实际 master SHA / 发布]
+1. 将全仓库 `GITHUB_TOKEN` 默认权限设为 **read repository contents**；工作流
+   中明确需要写入的 job 会使用声明的最小权限。
+2. 允许本方案实际使用的 actions：`actions/checkout@v7`、
+   `actions/upload-artifact@v7`、`actions/download-artifact@v7`。不要为此开放
+   workflow 创建新的 PAT 或长期凭据。
+3. 确认维护者可运行 Actions。`Sync-Upstream` 需要写候选分支、创建/更新 draft
+   PR、创建固定 `ci/sync-control-*` tag、调用 workflow dispatch 并写候选 pending
+   status；`PR-Build-Dispatch` 需要读取 PR、创建固定 tag、dispatch 和写 PR pending
+   status；`Sync-Result` 需要读取 actions/artifacts、PR/reviews/comments 并写
+   commit status。`OpenWrt-CI` 的 build job 只需要 contents read；只有独立
+   publisher 有 release/write 权限。不要让 PR 构建使用有写权限的 token。
+4. 为 `ci/sync-control-*` 配置 tag ruleset，禁止更新和删除，允许 controller
+   创建新 tag；限制管理员绕过。程序会拒绝复用指向别的 `W` 的现有 tag，
+   ruleset 则防止 tag 创建后被重指向。
+
+### 2. 手动 report 与候选试运行
+
+1. 从 `master` 手动运行 `Sync-Upstream` 的 `report`，同时勾选 `dry_run`。
+   检查报告中的当前 `B/U/M`、唯一 merge-base、四组有效差异、候选分支身份和
+   冲突 blob ID。
+2. 运行 `prepare` 并勾选 `dry_run`，检查候选树、fork contract 和新 lock。
+   这会在 runner 本地生成对象与报告，不推分支、不建 PR、不 dispatch。
+3. 本轮已知 EmmcImage 文本冲突，人工完成上一节的固定 `B/U` merge 和专项
+   review 后，运行 `register`。检查登记报告和 draft PR 的 `B/U/C/W/L`。
+4. 确认候选 PR HEAD 等于报告 `C`，workflow run 使用固定 `W` 的控制 tag，且
+   metadata 的 run ID/attempt、source SHA、lock digest 与候选一致。候选直接
+   `pull_request` 预览不会计入 ready；等待固定控制版本的显式 dispatch build。
+   对平台计划中的每项检查，reviewer 先对当前 HEAD 提交 APPROVED review，再发布
+   绑定 `C` 的证据评论，然后确认 `upstream/ready` 离开 pending。
+5. 如果构建失败或 artifact 已过期，审查原因后重新运行 controller，并勾选
+   `retry_build`。同一成功且 artifact 未过期的 build 会幂等复用。
+
+### 3. 验证受影响平台并配置 master 规则
+
+本轮**没有**运行远端固件构建。候选需要完整执行 `x86_64-passwall-docker`
+构建；另按差异验证以下受影响范围：
+
+- Qualcomm IPQ60xx：上述九类设备的 factory/sysupgrade 产物、DTS、caldata 和
+  upgrade 路径；逐设备核验 EmmcImage 的 6144k padding 与镜像声明。具备设备时
+  实测 recovery/刷写和 sysupgrade 路径。
+- Airoha AN7581 Gemtek W1700K 与 Nokia XG-040G-MD：UBI image、bootloader、fan
+  服务和 upgrade；AN7583 确认 `CONFIG_CRYPTO_HW=y`。需要设备时实测启动与升级。
+- Rockchip RK3568 ROCK 3B：6.18 SGMII/QSGMII patch 应用和相关 target 编译；有
+  设备时实测网口与启动。
+
+完成普通 PR 的可信 dispatch、`upstream/ready` 页面与平台证据验证，以及候选 PR
+的显式 dispatch 验证后，再
+为 `master` 配置规则：必须经 PR、required status `upstream/ready`、要求分支
+更新到最新 base、禁止直接 push 和 force push、限制管理员绕过。同步候选须有
+人工 review，并在 HEAD 改动后重新审查。仓库只允许 merge commit；关闭 squash
+和 rebase，以保留 upstream merge 父链。若维护者人数不足以满足 GitHub 的
+review 数量规则，应先指定另一名 reviewer 或书面确定规则例外，再开放候选合入。
+
+### 4. 合入与正式发布
+
+候选的 `upstream/ready` 和平台审查都通过后，确认 PR base 仍是报告中的 `B`、
+HEAD 仍是已验证 `C`，使用 **Create a merge commit** 合入。禁止 squash/rebase。
+合入后核对 upstream `U` 仍为 `master` 祖先，并记录实际默认分支合入 SHA `R`。
+
+从 `master` 手动运行正式 `OpenWrt-CI`，source SHA 显式指定为 `R`，不传
+`sync_id`：
+
+```sh
+R=YOUR_FULL_COMMIT_SHA
+gh workflow run openwrt-ci.yml --ref master \
+  -f source_sha="$R" \
+  -f build_reason=upstream-sync-release
 ```
 
-### 候选的身份和历史
+只有实际默认分支仍指向 `R` 的成功构建才能发布；若分支前进，保留 artifact，
+对当前默认分支 SHA 重新构建。
 
-一次尝试固定 `B`（fork base）、`U`（上游）、`M`（merge-base）；产生候选后
-记录 `C`，构建还记录 workflow commit `W` 与 feeds lock 摘要 `L`。SHA 使用
-完整 40 位值，分支名可缩写为 `sync/upstream-<B12>-<U12>`，但复用时必须
-检查完整值，缩写碰撞时报错。人工修复可以在这个候选分支追加提交；每次
-HEAD 变化都生成新 `C`，旧构建结果自动失效。
+### 5. 之后再开启 schedule
 
-在默认分支新增 `.github/upstream-state.json`，记录：
+完成至少一次手动候选、候选构建、required status、人工 merge 和正式发布闭环，
+再单独审查一个仅增加定时触发的提交。例如在
+`.github/workflows/sync-upstream.yml` 保留 `workflow_dispatch` 并增加：
 
-```json
-{
-  "schema_version": 1,
-  "upstream_repository": "coolsnowwolf/lede",
-  "upstream_branch": "master",
-  "upstream_sha": "<full-U-sha>",
-  "fork_base_sha": "<full-B-sha>"
-}
+```yaml
+  schedule:
+    - cron: "17 3 * * *"
 ```
 
-上例是字段约定，占位符不能作为实际状态。首次初始化人工核对最近一次
-确认的 upstream parent；本次探索得到的是 `241650a12…`。先验证它同时是
-`B` 与新 `U` 的祖先，不直接将 merge-base 自动认定为已确认的上游。
-
-状态更新随候选提交进入 PR，只有 PR 合入后才成为默认分支的确认状态。
-冲突报告不能推进它。`C` 和最终合入 SHA 不写进自身提交，保存在 PR、
-Actions metadata 和状态检查中，避免提交自引用。
-
-发现上游仓库／分支与状态不符、旧 upstream SHA 不是新 `U` 的祖先、找不到
-共同祖先或存在多个 merge-base 时，停止自动候选生成并要求历史审查。需要
-人工处理上游改写时，重新确认映射和有效树差异，不 reset fork 或强推 master。
-
-### 调度、去重和冲突处理
-
-1. `schedule` 与手动 dispatch 共用仓库级 concurrency，`cancel-in-progress:
-   false`。每次 fetch 后立即固定 SHA；后续按 SHA 操作，不随移动的 remote ref
-   变化。若 `U` 已是 `B` 的祖先，结果为 `no_updates`，不创建 PR 或构建。
-2. 默认最多保留一个待处理的同步候选。已有开放候选时，读取其身份、完整
-   HEAD SHA 和状态；同一 `B/U/C/L/W` 不重复 dispatch。上游前进只提示有新
-   更新，先完成当前候选；需要换批次时显式创建新候选，不强推旧分支。
-3. 在干净 runner 的独立候选 checkout 合并。正常生成的 merge 包含 `B/U`
-   父链，随后提交 state、feeds lock 等候选配置，再记录最终 `C`。提交消息
-   与 PR 描述仅包含公开仓库引用、相对路径和必要 SHA。
-4. 冲突时保存 `sync-report.json`、冲突路径、三方 blob ID、`M→B` 与 `M→U`
-   差异和复现方法为 Actions artifact，结果为 `needs_resolution`。不提交含
-   冲突标记的文件，不生成通过的检查。保存报告是一次有效运行，但候选仍
-   未通过验证，不能被报告 job 的绿色结果当成可合入依据。
-5. 冲突状态下不创建“仅指向 B”的空 PR。人工在独立分支重现固定 `B/U` 的
-   merge、解决并提交后，再进入候选注册与 draft PR 流程。已登记的冲突尝试
-   用 `B/U` 和 artifact 标识去重；报告过期后可重新生成，同一冲突不重复编译。
-6. 无冲突候选非强制 push 到新分支，创建 draft PR。若远端同名分支已有人工
-   提交，保留它并验证其来源，不覆盖。PR 创建失败保留候选，报告权限或
-   仓库设置错误，不退回直接推送 master。
-
-去重记录使用候选 PR 的机器可读身份与尝试报告，不依赖 commit message
-文本、默认分支历史提交数量或“最新一个成功运行”。同一候选失败后可手动
-重试，记录新的 run attempt；网络／权限错误分类为 `infra_failed`，与源码
-冲突、配置失败和编译失败分开。第一版不维护多个并行同步 PR。
-
-### 必须保护的 fork 功能
-
-新增 `.github/fork-contract.yml`，为每项登记相关路径、预期行为、检查方式和
-上游吸收后的退役条件。下表是从当前有效树差异提取的首批清单；实施时仍
-需逐项审查 126 个差异文件，不能把它当成已穷尽的自动化断言。
-
-| 功能 | 当前路径／行为 | 候选验证 |
-| --- | --- | --- |
-| Passwall provider | `feeds.conf.default` 中两组 Passwall 排在 packages/helloworld 前，LuCI 跟踪 openwrt-25.12 | 检查 feed 顺序，并解析安装后的实际 package symlink 和 provider；只查名称存在不足以通过 |
-| x86 profile | `profiles/x86_64-passwall-docker.diffconfig`：Passwall、Docker、firewall4、nft/iptables 透明代理、Xray/Sing-box、存储和容器依赖 | 展开配置后比较必需值；关键选择丢失或变成不同的 y/m/n 均需解释 |
-| 网络默认值 | 两份 `config_generate` 中 LAN 默认值；dnsmasq LAN start=110、limit=145 | 验证固件默认配置对应预期；不把已存在用户配置的升级保留行为当作默认值测试 |
-| Perl 覆盖 | `scripts/sync-official-perl.sh` 覆盖 packages/lang/perl 并刷新索引 | 核对官方源码 SHA、覆盖目录摘要和生成的包索引 |
-| Docker 构建兼容 | `patches/dockerd/100-skip-host-nested-binaries.patch` 经 staging helper 应用 | 校验 patch digest、适用性和完整 Docker 编译；feed 上游吸收后审查删除，不能静默跳过失败 |
-| Qualcomm 历史设备行为 | ipq60xx image、caldata、upgrade；已有设备与镜像模板 | image 与 DTS 路径一致，保留校准／升级映射；此次 EmmcImage 必须专项审查 |
-| Airoha 历史导入 | UBI 设备、bootloader 产物、fan／兼容版本与 image/upgrade 对应 | 检查完整设备链；改动交集触发相关平台构建 |
-| Rockchip 历史 backport | DTS、6.18 patch series、RK3568 SGMII 防护 | 检查当前内核上 patch 可应用、重复 backport 和 DTS；按影响范围追加平台验证 |
-| 源码与发布归属 | `ci-source-info.sh` 和 `openwrt-ci.yml` | checkout、metadata、artifact、release target 使用实际构建 SHA；候选无 release 写入 |
-
-每次报告同时提供 `M→B`（旧 fork 功能）、`M→U`（新增上游变化）、`B→C`
-（本次效果）和 `U→C`（最终 fork 差异）。对于重命名和已被上游吸收的功能，
-按行为核对映射；不能只做路径交集或要求旧 patch 文件永远存在。未知的 fork
-差异进入人工审查清单，不能自动丢弃。上游已知问题按前述修复边界单独跟踪。
-
-### feeds 固定与构建可复现性
-
-当前 `--sync-all-feeds` 跟踪多个远端分支，并独立刷新官方 Perl。仅固定主仓库
-`C`，两次构建仍可能取得不同 feeds，无法证明发布构建使用了候选验证的输入。
-
-第一版候选准备时新增 `.github/feed-lock.json`，固定所有启用的 Git feed 的
-完整 SHA、URL、原始顺序和跟踪分支，同时固定官方 Perl 的独立 SHA、覆盖
-目录摘要和 dockerd 补丁 SHA-256。lock 随候选提交，最终 `C` 在 lock 提交后
-计算。正常同步以此次选定的 feeds 快照为准，候选重试不刷新；单独刷新 feeds
-另开更新候选，不混同为“主仓库没有更新”。
-
-构建 helper 根据 lock 生成被 gitignore 忽略的 `feeds.conf`，使用本仓库
-`scripts/feeds` 支持的 `URL^commit` 语法并保留 provider 优先级。Perl helper
-新增精确 revision 模式，锁定模式不能再 fetch 最新分支替换它；staging
-helper 按固定摘要应用 dockerd patch。安装完成后重新核对每个 feed 的 HEAD
-和已声明的工作树覆盖，额外改动或 SHA 不一致时报错。不能仅用短 SHA 或
-`scripts/feeds list` 输出作为 lock。
-
-artifact 保存完整 lock、实际 feed revision、`.config`、diffconfig、package
-manifest、buildinfo、checksums 及机器可读的 `sync-validation.json`。至少记录
-`B/U/C/W/L`、profile、run ID/attempt、各检查结果和产物摘要。记录 overlay
-是必要的，因为 packages feed 的 HEAD 本身不会反映 Perl 替换和 dockerd patch。
-固定这些输入提高候选与发布的一致性，不承诺工具链环境和所有下载源完全
-确定，也不声称实现字节级可复现构建。
-
-### 验证与 GitHub Actions 关联
-
-分三层执行，便宜检查失败时不启动完整编译：
-
-1. **源码与轻量检查**：验证 `B/U` 都是 `C` 的祖先、state 和 lock 正确，执行
-   现有 `scripts/tests`，检查脚本／workflow，以及 fork contract 和三方差异。
-2. **配置与编译**：固定 feeds 后生成实际 x86 `.config`，核对必要选择与
-   provider，再按精确 `C` 完整构建 `x86_64-passwall-docker`。
-3. **受影响平台**：根据 `M→U` 和 `B→C` 与 contract 的语义交集生成验证计划。
-   image/DTS/upgrade 改动检查设备对应关系与产物；kernel/patch 改动执行相关
-   target 的 prepare／编译。共享 kernel/include 改动扩大检查范围，不只按文件
-   同名匹配。没有相应 profile 的平台先补专用验证配置，再声明通过；实机
-   boot、flash 和网络行为保留为人工验证项，不能用 x86 编译替代。
-
-保留 `workflow_dispatch` 调度方式，增加 `sync_id` 输入和包含该标识的
-`run-name`。第一版从已审查的默认分支提交 `W` 创建不可移动的控制 tag
-`ci/sync-control-<W12>`，在这个 tag 上 dispatch、明确传 `source_sha=C`；已有
-同名 tag 必须匹配完整 `W`，不能强制覆盖。这个非默认分支 ref 也使现有
-发布 gate 将构建归为候选。若选择候选 ref 运行其工作流变更，先审查相应
-workflow 版本，再显式登记新的 `W`，不能默许候选修改写权限控制逻辑。
-返回 run ID 后核对它的
-workflow ID、event、ref、head SHA 和 workflow 版本，再核对 artifact 的源码
-SHA 和 lock。不能把 API dispatch 成功、同名 workflow 成功或一个 `head_sha`
-当作源码构建成功。
-
-GitHub 当前 REST 文档在 API 版本 `2026-03-10` 下提供 dispatch 响应中的
-`workflow_run_id`。实施优先显式指定这个 API 版本并保存返回 ID；兼容旧版本
-204 空响应时，用唯一 `sync_id` 的 run-name 查找，出现零个／多个匹配都不能
-随便选“最新运行”。确认实际部署的 API 行为后再启用调度。
-
-调度工作流不在 runner 上等待数小时编译。由 `workflow_run: completed` 的
-结果工作流读取登记的 run ID/attempt，下载并核对 metadata，更新候选 `C`
-上的状态。它使用默认分支中的控制逻辑，不执行候选 artifact 中的脚本。
-重新运行取指定 attempt 的结果，旧结果不能覆盖新候选的状态。
-
-最终只在所有必需 job 的 `conclusion=success`、产物存在、源码／lock 匹配且
-PR HEAD 仍为 `C` 时写 `upstream/ready=success`；skipped、neutral、cancelled、
-metadata 缺失／过期或任何不符都不能通过。dispatch 的 job 不一定能直接作为
-PR 的 required check，因此控制器把验证结论写到实际候选 commit 的固定
-status context；分支保护要求这个聚合状态，而不是报告或 dispatch job。
-受影响平台若需要人工验证，则保持 pending，直到证据绑定同一 `C`。
-
-`GITHUB_TOKEN` 的分支 push 不会触发普通 push CI，显式 dispatch 避免依赖
-该隐式事件。按 2026-10-14 查阅的官方文档，机器人创建／更新 PR 可以产生
-需要批准的 PR workflow；也不能假定它会立即自动执行。第一版使用现有
-token 和显式 dispatch；只有确有跨仓库或免批准 PR CI 的需求时再引入 GitHub
-App，不将长期 PAT 作为上线前提。
-
-### 合入、发布与权限
-
-验证期间 `B` 前进或 `C` 被修改，旧的 `ready` 失效。重新创建基于新 `B` 的
-候选、更新 state/lock 并验证，不能通过给 PR 随手补一次 merge 就沿用旧 CI。
-上游 `U` 前进并不使已固定的候选失效；可以先合入这一批，再准备下一批。
-
-上线时为 master 配置规则：必须经 PR、要求 `upstream/ready`、要求分支与
-base 同步、禁止直接 push 和 force push，约束管理员绕过。bot 创建的同步
-PR 至少有一次人工 review，HEAD 改变时审批过期。全仓库是否强制 review
-需按维护人数配置：若只有一位维护者，不能要求他审批自己创建的普通 PR；
-同步 PR 的人工审批仍由聚合 gate 核对。`ready` 应作为普通 PR 也能运行的
-项目聚合检查：普通 fork
-改动验证来源、profile 与影响范围，不要求它改变 upstream state；否则统一
-分支保护会阻塞日常修改。同步 PR 额外核对固定 `B/U/C`。保留 merge 方法；
-同步 PR 的合入操作显式选 merge 并匹配 HEAD SHA，不使用 squash/rebase。
-规则不启用 require linear history，因为它与保留 upstream merge 父链冲突。
-
-人工合入后，另行 dispatch 默认分支的正式构建，固定实际合入 SHA `R`，沿用
-已合入的 feeds lock。`R` 若是 GitHub 生成的新 merge commit，使用 `R` 编译和
-记录发布归属，不把候选 `C` 直接当成最终发布源码。可由 default-branch push
-事件自动调度，也保留手动入口；若由 bot 使用 `GITHUB_TOKEN` 合入，需要
-显式 dispatch，不能依赖 push 事件。
-
-正式发布前重新获取默认分支，继续使用已有的源码归属 gate；已过时的构建
-保存 artifact，不更新 latest。发布 job 用仓库级 concurrency 串行化；候选
-artifact 保留 14 天，正式 history 保留 30 天。artifact 过期时重新构建，不能
-仅凭旧绿色状态批准。Git 引用与 release API 无跨资源原子事务，发布 gate
-表达的是检查时的 HEAD，发布中断后的 latest 修复需按实际 SHA 核对。
-
-| 阶段 | 权限与隔离 |
-| --- | --- |
-| 发现／差异报告 | `contents: read`，不执行候选的构建脚本 |
-| 候选 push／PR | `contents: write`、`pull-requests: write`；只运行控制逻辑，不执行候选脚本 |
-| dispatch | `actions: write`，记录请求与返回 run ID |
-| 构建 | `contents: read`，checkout `persist-credentials: false`；仅上传 artifacts |
-| 结果核对／状态 | `actions: read`、`contents: read`、`pull-requests: read`、`statuses: write`；不执行 artifact 内容 |
-| 正式发布 | 独立可信 publisher job，`contents: write`；核对源码、元数据和分支 gate 后写 release/tag |
-
-当前 OpenWrt-CI 把编译与发布放在同一个持有 `contents: write` 的 job，现有
-发布 gate 只能约束正常控制流。实施时拆成只读 build 与写权限 publisher，
-不能只增加一个“候选不发布”的 if 就声称实现权限隔离。候选创建、状态
-汇总、publisher 等控制步骤均从可信 workflow 版本取逻辑，外部 fork PR 不
-进入有写权限的候选调度流程。不得使用带写 token 的 `pull_request_target`
-去执行候选代码。
-
-### 文件与实施顺序
-
-| 文件 | 计划职责 |
-| --- | --- |
-| `.github/upstream-state.json` | 默认分支已确认的上游身份和 SHA |
-| `.github/fork-contract.yml` | fork 功能、检查和退役条件 |
-| `.github/feed-lock.json` | 完整 feeds／Perl 快照与覆盖摘要 |
-| `scripts/upstream-sync.py` | SHA 校验、历史检查、候选／报告生成、幂等复用；第一版只实现 prepare/report |
-| `scripts/verify-fork-contract.py` | 实际配置、provider、设备映射检查与影响计划 |
-| `scripts/sync-feeds.sh` 等 helper | 增加 lock 模式，保留交互更新入口 |
-| `.github/workflows/sync-upstream.yml` | 候选生成及 dispatch，不推送 master |
-| `.github/workflows/openwrt-ci.yml` | 固定源码和 lock、只读构建、artifact、独立正式发布 |
-| `.github/workflows/sync-result.yml` | 异步核对 run／metadata、汇总 `upstream/ready` |
-| `scripts/tests/` | 用临时仓库覆盖状态、冲突、历史改写、过期结果及发布隔离 |
-
-分四步实施，每一步都可审查，不先开启新的定时写操作：
-
-1. **建立基线**：审查有效 fork 差异并登记 contract，初始化 upstream state，
-   明确此次 Qualcomm 冲突的设备行为；补充 lock 与构建元数据能力。确保
-   profile 必需值及实际 provider 可验证。
-2. **手动候选试运行**：实现 prepare/report 与 dry-run，使用固定 `B/U` 生成
-   冲突报告；人工解决后推候选、按 `C/L` 完整构建，完成 Qualcomm 专项验证。
-   此阶段不自动合入、不开新 schedule。切换时停用旧的直接合入路径，避免
-   它与候选流程同时修改 master。
-3. **闭环与规则**：拆 build/publisher，完成显式 dispatch、异步结果关联和
-   普通 PR 聚合检查，设置分支保护。验证人工 merge 后 `U` 仍是 master 的
-   祖先，再用实际 `R` 进行正式发布构建。
-4. **启用自动发现**：完整走通一次手动闭环后，将现有 schedule 切换为候选
-   模式；最多一个开放候选。保留手动重试／报告模式，不以直接 push master
-   作为回退方案。
-
-实施验收至少覆盖：无更新、正常 merge、当前 EmmcImage 冲突、人工候选
-被修改、同一尝试重复调度、上游历史改写、多 merge-base、base 前进、feeds
-漂移／overlay 错误、配置被静默丢弃、错误 run 或 attempt、skipped job、
-artifact 过期、PR 权限不足、候选不写 release，以及 merge 后 ancestry 与
-实际发布 SHA。测试优先用临时 Git 仓库和模拟 API；真正的完整固件构建与
-受影响平台检查在候选上执行。本次仅验证设计依据，没有执行这些新增验收。
+该 UTC 时间只作为维护者示例。schedule 仍运行相同的候选 prepare/controller，
+不会直接更新 master；最多复用一个身份完全匹配的候选。发布 branch rule、权限、
+artifact 保留期和通知责任都确认后，才合入这个 schedule 提交。保持
+`retry_build` 默认关闭，失败/过期候选需人工判断后显式重试。
 
 ## 技术依据
 
-- 探索与文档核对日期：2026-10-14。仓库当前使用 checkout v7 和 upload-artifact v7；本方案不包含 action 版本升级。
-- [GitHub workflow_dispatch 的 ref/SHA 语义](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
-- [GitHub workflow_sha context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context)
-- [upload-artifact v7 使用方式与保留期](https://github.com/actions/upload-artifact/tree/v7)
-- [GITHUB_TOKEN 的事件触发限制与 PR workflow 批准](https://docs.github.com/en/actions/concepts/security/github_token)
-- [workflow dispatch REST API；2026-03-10 版本响应](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
-- [严格 required checks、base 更新与分支保护](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
-- [近期同步失败日志](https://github.com/mizuikki/lede/actions/runs/37864741037)
+- GitHub Actions context、`workflow_dispatch` 和 `workflow_run`：
+  [Contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts)、
+  [Events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)。
+- GitHub `pull_request_target` 安全说明（不得 checkout/执行不可信 PR 内容）：
+  https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
+- Actions REST workflow runs API（精确 run ID/attempt）与 workflow dispatch：
+  https://docs.github.com/en/rest/actions/workflow-runs
+  https://docs.github.com/en/rest/actions/workflows
+- GitHub CLI `gh pr list --json` field list（候选发现读取 `headRepository` 以排除 fork PR）：
+  https://cli.github.com/manual/gh_pr_list
+- GitHub REST pull request list 的 `head` 参数格式为 `owner:branch`，并返回 `head.ref`、
+  `head.sha` 和 `head.repo`：
+  https://docs.github.com/en/rest/pulls/pulls#list-pull-requests
+- Workflow dispatch REST API：
+  [Create a workflow dispatch event](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。
+  Context7 核对了 API 与 Actions 语义；Tavily 于 2026-10-14 复核官方 REST 文档，
+  dispatch 响应版本 `2026-03-10` 含 `workflow_run_id`。
+- REST API 变更说明：
+  https://docs.github.com/en/rest/about-the-rest-api/breaking-changes
+- GITHUB_TOKEN 事件触发限制：
+  [Automatic token authentication](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication)。
+- Required status checks 和分支保护：
+  [Protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)。
+- Actions 版本：沿用本仓库现有 checkout v7 和 artifact v7，没有借本次同步升级 action。

@@ -18,6 +18,8 @@ Options:
   -f, --force       Force "feeds update" (passes -f)
   --no-sync-official-perl
                     Skip automatic synchronization of official perl
+  --locked           Install exact feed and overlay revisions from .github/feed-lock.json
+  --lock-file PATH   Use another feed lock file with --locked
   -h, --help        Show this help
 
 Examples:
@@ -45,6 +47,8 @@ do_update=1
 do_install=1
 force=0
 sync_perl=1
+locked=0
+lock_file="$TOPDIR/.github/feed-lock.json"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,12 +56,45 @@ while [[ $# -gt 0 ]]; do
     --install-only) do_update=0; shift ;;
     -f|--force) force=1; shift ;;
     --no-sync-official-perl) sync_perl=0; shift ;;
+    --locked) locked=1; shift ;;
+    --lock-file) lock_file="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) break ;;
   esac
 done
 
 feeds=("$@")
+
+if [[ "$locked" -eq 1 ]]; then
+  if [[ "${#feeds[@]}" -gt 0 || "$do_update" -ne 1 || "$do_install" -ne 1 || "$force" -ne 0 || "$sync_perl" -ne 1 ]]; then
+    echo "Error: --locked must be used alone; it always installs all locked feeds and overlays." >&2
+    exit 2
+  fi
+  if [[ ! -f "$lock_file" ]]; then
+    echo "Error: feed lock not found: $lock_file" >&2
+    exit 1
+  fi
+  if [[ -e "$TOPDIR/feeds.conf" ]]; then
+    echo "Error: feeds.conf already exists; refusing to replace a local feed configuration." >&2
+    exit 1
+  fi
+  cleanup_locked_config() {
+    rm -f "$TOPDIR/feeds.conf"
+  }
+  trap cleanup_locked_config EXIT
+
+  echo "[1/4] Materializing pinned feed configuration"
+  python3 scripts/feed-lock.py materialize --lock "$lock_file" --output feeds.conf
+  echo "[2/4] Installing pinned Git feeds"
+  ./scripts/feeds update -a
+  echo "[3/4] Applying locked official Perl and dockerd overlays"
+  ./scripts/sync-official-perl.sh --locked --lock-file "$lock_file"
+  ./scripts/stage-dockerd-build-patch.sh --locked --lock-file "$lock_file"
+  echo "[4/4] Installing feed packages and verifying all inputs"
+  ./scripts/feeds install -a
+  python3 scripts/feed-lock.py verify --root "$TOPDIR" --lock "$lock_file" --feeds-conf "$TOPDIR/feeds.conf.default"
+  exit 0
+fi
 
 update_args=()
 install_args=()

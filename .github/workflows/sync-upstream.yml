@@ -1,84 +1,389 @@
 name: Sync-Upstream
+run-name: Sync-Upstream ${{ inputs.mode || 'prepare' }} ${{ inputs.candidate_ref || github.run_id }}
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: 17 20 * * *
+    inputs:
+      mode:
+        description: Prepare a candidate, produce a report, or register a manually resolved candidate
+        type: choice
+        options:
+          - prepare
+          - report
+          - register
+        default: prepare
+        required: true
+      dry_run:
+        description: Generate and validate locally without pushing a candidate, opening a PR, or dispatching a build
+        type: boolean
+        default: false
+        required: true
+      candidate_ref:
+        description: Existing candidate branch to validate for register mode or to reuse
+        type: string
+        required: false
+        default: ""
+      retry_build:
+        description: Start a new exact build after a previous candidate attempt failed or expired
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   actions: write
   contents: write
+  pull-requests: write
+  statuses: write
 
 concurrency:
-  group: sync-upstream-${{ github.ref }}
+  group: upstream-sync-controller
   cancel-in-progress: false
 
 jobs:
-  sync_upstream:
-    name: Sync Upstream
+  prepare_candidate:
+    name: Prepare upstream candidate
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      UPSTREAM_REPO: coolsnowwolf/lede
-      BUILD_WORKFLOW_FILE: openwrt-ci.yml
+      MODE: ${{ inputs.mode || 'prepare' }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
+      REQUESTED_CANDIDATE_REF: ${{ inputs.candidate_ref }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout repository
+      - name: Checkout the trusted controller commit
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Merge upstream when updated
-        id: sync
+      - name: Fetch and pin fork and upstream commits
+        id: refs
         run: |
           set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git remote add upstream https://github.com/coolsnowwolf/lede.git
+          git fetch --no-tags upstream "+refs/heads/master:refs/remotes/upstream/master"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          base_sha="$(git rev-parse "refs/remotes/origin/${DEFAULT_BRANCH}^{commit}")"
+          upstream_sha="$(git rev-parse 'refs/remotes/upstream/master^{commit}')"
+          mapfile -t identity < <(python3 - "$base_sha" "$upstream_sha" "$WORKFLOW_SHA" <<'PY'
+          import sys
+          sys.path.insert(0, 'scripts')
+          from upstream_sync_control import candidate_branch, candidate_sync_id
+          base, upstream, workflow = sys.argv[1:]
+          print(candidate_sync_id(base, upstream, workflow))
+          print(candidate_branch(base, upstream, workflow))
+          PY
+          )
+          sync_id="${identity[0]}"
+          candidate_branch="${identity[1]}"
 
-          git remote remove upstream 2>/dev/null || true
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "candidate_branch=${candidate_branch}" >> "$GITHUB_OUTPUT"
+          echo "sync_id=${sync_id}" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=${WORKFLOW_SHA}" >> "$GITHUB_OUTPUT"
 
-          git fetch origin "${DEFAULT_BRANCH}"
-          git fetch upstream "${DEFAULT_BRANCH}"
+      - name: Prepare Python YAML support for the fork contract
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
 
-          git checkout "${DEFAULT_BRANCH}"
-          git reset --hard "origin/${DEFAULT_BRANCH}"
+      - name: Find an existing candidate without changing it
+        id: existing
+        run: |
+          set -euo pipefail
+          pull_json="$(gh pr list --state open --json number,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,url --limit 1000)"
+          selected="$(PULLS_JSON="$pull_json" REPOSITORY="$GITHUB_REPOSITORY" python3 - "$DEFAULT_BRANCH" <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from upstream_sync_control import select_open_candidate
+          print(json.dumps(select_open_candidate(
+              json.loads(os.environ["PULLS_JSON"]), sys.argv[1], os.environ["REPOSITORY"]
+          ) or {}))
+          PY
+          )"
+          selected_branch="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("headRefName", ""))' <<< "$selected")"
+          candidate_branch="$selected_branch"
+          if [[ -n "$REQUESTED_CANDIDATE_REF" ]]; then
+            requested_branch="${REQUESTED_CANDIDATE_REF#refs/heads/}"
+            git check-ref-format "refs/heads/${requested_branch}"
+            if [[ -n "$selected_branch" && "$requested_branch" != "$selected_branch" ]]; then
+              echo "candidate_ref differs from the sole open upstream candidate" >&2
+              exit 1
+            fi
+            candidate_branch="$requested_branch"
+          fi
+          if [[ -z "$candidate_branch" ]]; then candidate_branch='${{ steps.refs.outputs.candidate_branch }}'; fi
 
-          if git merge-base --is-ancestor "upstream/${DEFAULT_BRANCH}" "origin/${DEFAULT_BRANCH}"; then
-            echo "has_updates=false" >> "${GITHUB_OUTPUT}"
-            echo "No upstream updates to merge."
-            exit 0
+          current_base='${{ steps.refs.outputs.base_sha }}'
+          pinned_base="$current_base"
+          pinned_upstream='${{ steps.refs.outputs.upstream_sha }}'
+          pinned_workflow='${{ steps.refs.outputs.workflow_sha }}'
+          pinned_sync='${{ steps.refs.outputs.sync_id }}'
+          # candidate_branch is the planned identity. candidate_ref stays empty until
+          # the remote branch is found and fetched successfully.
+          candidate_ref=""
+          exists=false
+          stale=false
+          if git ls-remote --exit-code --heads origin "$candidate_branch" >/dev/null 2>&1; then
+            git fetch --no-tags origin "+refs/heads/${candidate_branch}:refs/remotes/origin/${candidate_branch}"
+            candidate_ref="refs/remotes/origin/${candidate_branch}"
+            exists=true
+            if git cat-file -e "${candidate_ref}:.github/upstream-candidate.json" 2>/dev/null; then
+              manifest="$(git show "${candidate_ref}:.github/upstream-candidate.json")"
+              identity="$(MANIFEST_JSON="$manifest" python3 - "$candidate_branch" <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from upstream_sync_control import validate_candidate_manifest
+          manifest = json.loads(os.environ["MANIFEST_JSON"])
+          validate_candidate_manifest(sys.argv[1], manifest)
+          print(json.dumps(manifest))
+          PY
+              )"
+              pinned_base="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["base_sha"])' <<< "$identity")"
+              pinned_upstream="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["upstream_sha"])' <<< "$identity")"
+              pinned_workflow="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["workflow_sha"])' <<< "$identity")"
+              pinned_sync="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sync_id"])' <<< "$identity")"
+              git merge-base --is-ancestor "$pinned_workflow" "$current_base" || {
+                echo "candidate control workflow is not in the current default-branch history" >&2
+                exit 1
+              }
+              if [[ "$current_base" != "$pinned_base" ]]; then stale=true; fi
+            elif [[ -n "$selected_branch" ]]; then
+              echo "open candidate has no fixed B/U/W manifest" >&2
+              exit 1
+            elif [[ "$candidate_branch" != '${{ steps.refs.outputs.candidate_branch }}' ]]; then
+              echo "unregistered candidate branch does not match the current fixed B/U/W identity" >&2
+              exit 1
+            fi
+          elif [[ "$MODE" == "register" ]]; then
+            echo "register mode candidate branch does not exist" >&2
+            exit 1
           fi
 
-          before_sha="$(git rev-parse HEAD)"
+          echo "candidate_ref=${candidate_ref}" >> "$GITHUB_OUTPUT"
+          echo "exists=${exists}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${pinned_base}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${pinned_upstream}" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=${pinned_workflow}" >> "$GITHUB_OUTPUT"
+          echo "sync_id=${pinned_sync}" >> "$GITHUB_OUTPUT"
+          echo "candidate_branch=${candidate_branch}" >> "$GITHUB_OUTPUT"
+          echo "stale=${stale}" >> "$GITHUB_OUTPUT"
 
-          git merge --no-edit "upstream/${DEFAULT_BRANCH}"
-
-          after_sha="$(git rev-parse HEAD)"
-          if [[ "${before_sha}" == "${after_sha}" ]]; then
-            echo "has_updates=false" >> "${GITHUB_OUTPUT}"
-            echo "No merge result to push."
-            exit 0
-          fi
-
-          git push origin "HEAD:${DEFAULT_BRANCH}"
-
-          echo "has_updates=true" >> "${GITHUB_OUTPUT}"
-          echo "merged_sha=${after_sha}" >> "${GITHUB_OUTPUT}"
-          echo "merged_short_sha=$(git rev-parse --short "${after_sha}")" >> "${GITHUB_OUTPUT}"
-
-      - name: Trigger build workflow
-        if: steps.sync.outputs.has_updates == 'true'
+      - name: Report a candidate made stale by default-branch movement
+        if: steps.existing.outputs.stale == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          CURRENT_BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          PINNED_BASE_SHA: ${{ steps.existing.outputs.base_sha }}
+          PINNED_UPSTREAM_SHA: ${{ steps.existing.outputs.upstream_sha }}
+          PINNED_WORKFLOW_SHA: ${{ steps.existing.outputs.workflow_sha }}
+          CANDIDATE_BRANCH: ${{ steps.existing.outputs.candidate_branch }}
+          CANDIDATE_REF: ${{ steps.existing.outputs.candidate_ref }}
+        run: |
+          python3 - <<'PY' > sync-report.json
+          import json, os, subprocess
+          candidate_sha = subprocess.check_output(
+              ['git', 'rev-parse', os.environ['CANDIDATE_REF'] + '^{commit}'], text=True,
+          ).strip()
+          print(json.dumps({
+              "schema_version": 1,
+              "status": "candidate_expired",
+              "reason": "default branch advanced after this candidate was prepared",
+              "candidate_branch": os.environ["CANDIDATE_BRANCH"],
+              "pinned_base_sha": os.environ["PINNED_BASE_SHA"],
+              "current_base_sha": os.environ["CURRENT_BASE_SHA"],
+              "upstream_sha": os.environ["PINNED_UPSTREAM_SHA"],
+              "workflow_sha": os.environ["PINNED_WORKFLOW_SHA"],
+              "candidate_sha": candidate_sha,
+              "next_step": "close the stale candidate PR, then explicitly prepare a replacement",
+          }, indent=2))
+          PY
+
+      - name: Clear ready status for an expired candidate
+        if: >-
+          steps.existing.outputs.stale == 'true' &&
+          inputs.mode != 'report' && inputs.dry_run != true
+        env:
+          MODE: ${{ inputs.mode || 'prepare' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          CANDIDATE_REF: ${{ steps.existing.outputs.candidate_ref }}
         run: |
           set -euo pipefail
+          if [[ "$MODE" == "report" || "$DRY_RUN" == "true" ]]; then
+            echo "refusing remote status writes in report or dry-run mode" >&2
+            exit 1
+          fi
+          candidate_sha="$(git rev-parse "${CANDIDATE_REF}^{commit}")"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${candidate_sha}" \
+            --input - <<'JSON' >/dev/null
+          {
+            "state": "failure",
+            "context": "upstream/ready",
+            "description": "Candidate expired because the default branch advanced"
+          }
+          JSON
 
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/${BUILD_WORKFLOW_FILE}/dispatches" \
-            -f ref="${DEFAULT_BRANCH}" \
-            -f inputs[build_reason]="upstream-sync" \
-            -f inputs[source_sha]="${{ steps.sync.outputs.merged_sha }}"
+      - name: Prepare a report or a candidate commit
+        id: prepare
+        if: steps.existing.outputs.stale != 'true'
+        env:
+          BASE_SHA: ${{ steps.existing.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ steps.existing.outputs.upstream_sha }}
+          PINNED_WORKFLOW_SHA: ${{ steps.existing.outputs.workflow_sha }}
+          SYNC_ID: ${{ steps.existing.outputs.sync_id }}
+          EXISTING_CANDIDATE: ${{ steps.existing.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          args=(--repo . --base "$BASE_SHA" --upstream "$UPSTREAM_SHA" \
+            --workflow-sha "$PINNED_WORKFLOW_SHA" --sync-id "$SYNC_ID" \
+            --output sync-report.json)
+          if [[ "$DRY_RUN" == "true" || "$MODE" == "report" ]]; then args+=(--dry-run); fi
+          if [[ -n "$EXISTING_CANDIDATE" ]]; then
+            args+=(--candidate-ref "$EXISTING_CANDIDATE")
+          elif [[ "$MODE" == "register" ]]; then
+            echo "register mode requires an existing candidate branch" >&2
+            exit 1
+          fi
+
+          if [[ "$MODE" == "register" ]]; then
+            python3 scripts/upstream-sync.py register "${args[@]}"
+          elif [[ "$MODE" == "report" ]]; then
+            args+=(--no-lock-refresh)
+            python3 scripts/upstream-sync.py report "${args[@]}"
+          elif [[ -n "$EXISTING_CANDIDATE" ]]; then
+            args+=(--no-lock-refresh)
+            python3 scripts/upstream-sync.py prepare "${args[@]}"
+          else
+            python3 scripts/upstream-sync.py prepare "${args[@]}"
+          fi
+
+          status="$(python3 -c 'import json; print(json.load(open("sync-report.json"))["status"])')"
+          candidate_sha="$(python3 -c 'import json; print(json.load(open("sync-report.json")).get("candidate_sha", ""))')"
+          lock_sha="$(python3 -c 'import json; print(json.load(open("sync-report.json")).get("feed_lock_sha256", ""))')"
+          candidate_branch="$(python3 -c 'import json; print(json.load(open("sync-report.json"))["candidate_branch"])')"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
+          echo "feed_lock_sha256=${lock_sha}" >> "$GITHUB_OUTPUT"
+          echo "candidate_branch=${candidate_branch}" >> "$GITHUB_OUTPUT"
+          merge_base_sha="$(python3 -c 'import json; print(json.load(open("sync-report.json"))["merge_base_sha"])')"
+          echo "merge_base_sha=${merge_base_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify fork contract against the candidate tree
+        if: steps.prepare.outputs.status == 'candidate_ready' || steps.prepare.outputs.status == 'candidate_reused' || steps.prepare.outputs.status == 'candidate_registered'
+        env:
+          CANDIDATE_SHA: ${{ steps.prepare.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-fork-contract.py \
+            --root . --mode source --source-ref "$CANDIDATE_SHA" \
+            --trusted-ref "$WORKFLOW_SHA" --output fork-contract-report.json
+          git diff --check "${{ steps.existing.outputs.base_sha }}" "$CANDIDATE_SHA"
+
+      - name: Register candidate and open a draft PR
+        if: >-
+          inputs.mode != 'report' && inputs.dry_run != true &&
+          (steps.prepare.outputs.status == 'candidate_ready' || steps.prepare.outputs.status == 'candidate_reused' || steps.prepare.outputs.status == 'candidate_registered')
+        env:
+          BASE_SHA: ${{ steps.existing.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ steps.existing.outputs.upstream_sha }}
+          CANDIDATE_SHA: ${{ steps.prepare.outputs.candidate_sha }}
+          CANDIDATE_BRANCH: ${{ steps.prepare.outputs.candidate_branch }}
+          FEED_LOCK_SHA256: ${{ steps.prepare.outputs.feed_lock_sha256 }}
+          SYNC_ID: ${{ steps.existing.outputs.sync_id }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.existing.outputs.exists }}" == "true" ]]; then
+              existing_sha="$(git rev-parse '${{ steps.existing.outputs.candidate_ref }}^{commit}')"
+            if [[ "$existing_sha" != "$CANDIDATE_SHA" ]]; then
+              if [[ "$MODE" != "register" ]] || ! git merge-base --is-ancestor "$existing_sha" "$CANDIDATE_SHA"; then
+                echo "candidate branch HEAD changed; refusing a non-fast-forward update" >&2
+                exit 1
+              fi
+              gh auth setup-git
+              git push origin "$CANDIDATE_SHA:refs/heads/$CANDIDATE_BRANCH"
+            fi
+          else
+            if git ls-remote --exit-code --heads origin "$CANDIDATE_BRANCH" >/dev/null 2>&1; then
+              echo "candidate branch appeared during preparation; refusing to overwrite it" >&2
+              exit 1
+            fi
+            gh auth setup-git
+            git push origin "$CANDIDATE_SHA:refs/heads/$CANDIDATE_BRANCH"
+          fi
+
+          pull_json="$(gh pr list --state open --base "$DEFAULT_BRANCH" --head "$CANDIDATE_BRANCH" --json number,headRefOid,baseRefOid,url)"
+          if [[ "$pull_json" == "[]" ]]; then
+            python3 - "$BASE_SHA" "$UPSTREAM_SHA" "$CANDIDATE_SHA" "$FEED_LOCK_SHA256" "$SYNC_ID" > pr-body.md <<'PY'
+          import json, sys
+          base, upstream, candidate, lock_sha, sync_id = sys.argv[1:]
+          marker = json.dumps({'base_sha': base, 'upstream_sha': upstream, 'candidate_sha': candidate,
+                               'feed_lock_sha256': lock_sha, 'sync_id': sync_id}, separators=(',', ':'))
+          print("\n".join((
+              "Prepare a reviewed merge from coolsnowwolf/lede.",
+              "",
+              f"<!-- upstream-candidate:{marker} -->",
+              "",
+              f"- Fork base: `{base}`",
+              f"- Upstream: `{upstream}`",
+              f"- Candidate: `{candidate}`",
+              f"- Feed lock SHA-256: `{lock_sha}`",
+              "- Review the fork contract and affected platform plan before merge.",
+              "- Merge this pull request with a merge commit after all required checks pass.",
+          )))
+          PY
+            gh pr create --draft --base "$DEFAULT_BRANCH" --head "$CANDIDATE_BRANCH" \
+              --title "Upstream sync ${UPSTREAM_SHA:0:12}" --body-file pr-body.md
+          else
+            count="$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' <<< "$pull_json")"
+            if [[ "$count" != "1" ]]; then
+              echo "candidate has more than one open pull request" >&2
+              exit 1
+            fi
+            current_head="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["headRefOid"])' <<< "$pull_json")"
+            if [[ "$current_head" != "$CANDIDATE_SHA" ]]; then
+              echo "open candidate PR HEAD does not match the validated commit" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Dispatch the pinned candidate build
+        if: >-
+          inputs.mode != 'report' && inputs.dry_run != true &&
+          (steps.prepare.outputs.status == 'candidate_ready' || steps.prepare.outputs.status == 'candidate_reused' || steps.prepare.outputs.status == 'candidate_registered')
+        env:
+          BASE_SHA: ${{ steps.existing.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ steps.existing.outputs.upstream_sha }}
+          CANDIDATE_SHA: ${{ steps.prepare.outputs.candidate_sha }}
+          FEED_LOCK_SHA256: ${{ steps.prepare.outputs.feed_lock_sha256 }}
+          SYNC_ID: ${{ steps.existing.outputs.sync_id }}
+          PINNED_WORKFLOW_SHA: ${{ steps.existing.outputs.workflow_sha }}
+          RETRY_BUILD: ${{ inputs.retry_build }}
+        run: |
+          set -euo pipefail
+          args=(
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-sha "$PINNED_WORKFLOW_SHA" \
+            --source-sha "$CANDIDATE_SHA" \
+            --base-sha "$BASE_SHA" \
+            --upstream-sha "$UPSTREAM_SHA" \
+            --merge-base-sha "${{ steps.prepare.outputs.merge_base_sha }}" \
+            --feed-lock-sha256 "$FEED_LOCK_SHA256" \
+            --sync-id "$SYNC_ID" \
+            --output dispatch-record.json
+          )
+          if [[ "$RETRY_BUILD" == "true" ]]; then args+=(--retry-existing); fi
+          python3 scripts/sync-dispatch.py "${args[@]}"
+
+      - name: Upload sync report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-sync-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            sync-report.json
+            fork-contract-report.json
+            dispatch-record.json
+          if-no-files-found: warn
+          retention-days: 14

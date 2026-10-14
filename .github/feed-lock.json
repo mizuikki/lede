@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "feeds": [
+    {
+      "name": "passwall_packages",
+      "url": "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git",
+      "branch": "main",
+      "configured_branch": "main",
+      "revision": "1af0a5c4fb3a227201683b64d32f61c65db9be72",
+      "order": 1
+    },
+    {
+      "name": "passwall_luci",
+      "url": "https://github.com/Openwrt-Passwall/openwrt-passwall.git",
+      "branch": "main",
+      "configured_branch": "main",
+      "revision": "8f7323858c6a76e55d5874bc7704e5a18bf3c951",
+      "order": 2
+    },
+    {
+      "name": "packages",
+      "url": "https://github.com/coolsnowwolf/packages.git",
+      "branch": "master",
+      "configured_branch": null,
+      "revision": "3cfeea42e66253d728773ec457e18282f5d9f6fd",
+      "order": 3
+    },
+    {
+      "name": "luci",
+      "url": "https://github.com/coolsnowwolf/luci.git",
+      "branch": "openwrt-25.12",
+      "configured_branch": "openwrt-25.12",
+      "revision": "cae27bd8ad448b7d6216c581cd2852ffa971b1c5",
+      "order": 4
+    },
+    {
+      "name": "routing",
+      "url": "https://github.com/coolsnowwolf/routing.git",
+      "branch": "main",
+      "configured_branch": null,
+      "revision": "2d0f967bd6bd95d4c0d3c330e4713e79d75b4c54",
+      "order": 5
+    },
+    {
+      "name": "telephony",
+      "url": "https://github.com/coolsnowwolf/telephony.git",
+      "branch": "master",
+      "configured_branch": null,
+      "revision": "d3bcb153813b1ff34b3dd0f1bf0dc913984f2921",
+      "order": 6
+    },
+    {
+      "name": "helloworld",
+      "url": "https://github.com/fw876/helloworld.git",
+      "branch": "dev",
+      "configured_branch": null,
+      "revision": "2d9199beb9f363156d83863e1cae42cda87c161d",
+      "order": 7
+    }
+  ],
+  "overlays": {
+    "official_perl": {
+      "repository": "https://github.com/openwrt/packages",
+      "branch": "openwrt-25.12",
+      "revision": "54fab7fa4224193a121f49a9f39dafd9323a0b2d",
+      "path": "feeds/packages/lang/perl",
+      "tree": "8a52429a125263c9841f4afd8359b79bdf269cc2",
+      "sha256": "0f944c2543ff7b85385f1edc04532746829ac2b083f81fc2569351ed40aaca1c"
+    },
+    "dockerd_patch": {
+      "path": "patches/dockerd/100-skip-host-nested-binaries.patch",
+      "staged_path": "feeds/packages/utils/dockerd/patches/999-openwrt-skip-host-nested-binaries.patch",
+      "sha256": "324f61d01039d723085619229d592f4a6ce456e9556e873bdb3228c00b061325"
+    }
+  }
+}
