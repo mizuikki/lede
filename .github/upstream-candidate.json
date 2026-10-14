@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "base_sha": "2ed84633b437962121b6d03ce496d0e4b8c32321",
+  "upstream_sha": "07cebbcf28f61637047645c3fedc829ee9cc3688",
+  "merge_base_sha": "241650a12c1121c76ba6e82567f3cbd81e368d3d",
+  "workflow_sha": "2ed84633b437962121b6d03ce496d0e4b8c32321",
+  "feed_lock_sha256": "b72d34b5898d8018025c65ab54e211bb637bc8c324ba1ca0b53a7cf1743c6506",
+  "sync_id": "upstream-2ed84633b437-07cebbcf28f6-w2ed84633b437",
+  "merge_commit_sha": "977a63f9be9649626eb79909fb4ec36601487714"
+}

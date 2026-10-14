@@ -2,6 +2,6 @@
   "schema_version": 1,
   "upstream_repository": "coolsnowwolf/lede",
   "upstream_branch": "master",
-  "upstream_sha": "241650a12c1121c76ba6e82567f3cbd81e368d3d",
-  "fork_base_sha": "2abb33d9b48e615081b64b35ef2b4f78b68bd6f2"
+  "upstream_sha": "07cebbcf28f61637047645c3fedc829ee9cc3688",
+  "fork_base_sha": "2ed84633b437962121b6d03ce496d0e4b8c32321"
 }
