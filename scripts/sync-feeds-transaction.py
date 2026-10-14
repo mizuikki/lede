@@ -136,7 +136,8 @@ def prepare(root: Path, stage: Path, lock: dict) -> None:
             except Error as exc:
                 raise Error(f"cannot fetch feed {feed['name']}: {exc}") from exc
         command(stage, "git", "-C", str(destination), "checkout", "--quiet", "--detach", feed["revision"])
-        command(stage, "git", "-C", str(destination), "update-ref", "refs/remotes/origin/" + feed["branch"], feed["revision"])
+        remote_branch = feed.get("branch") or "locked"
+        command(stage, "git", "-C", str(destination), "update-ref", "refs/remotes/origin/" + remote_branch, feed["revision"])
     command(stage, "./scripts/feeds", "update", "-a")
     command(stage, "./scripts/sync-official-perl.sh", "--locked")
     command(stage, "./scripts/stage-dockerd-build-patch.sh", "--locked")

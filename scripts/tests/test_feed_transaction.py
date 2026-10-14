@@ -72,6 +72,17 @@ class TransactionTests(unittest.TestCase):
         txn.check_existing(self.root)
         self.assertEqual((self.package / 'lang/perl/Makefile').read_text(), 'managed perl\n')
 
+    def test_pinned_feed_without_configured_branch_can_be_prepared(self):
+        lock = copy.deepcopy(self.lock)
+        lock['feeds'][0]['branch'] = None
+        stage = self.root / '.cache/prepared'
+        with mock.patch.object(txn, 'copy_source'), mock.patch.object(txn, 'command') as command, \
+                mock.patch.object(inputs, 'collect_requirements', return_value={}), \
+                mock.patch.object(api, 'verify_installed', return_value=[]):
+            txn.prepare(self.root, stage, lock)
+        command.assert_any_call(stage, 'git', '-C', str(stage / 'feeds/packages'),
+                                'update-ref', 'refs/remotes/origin/locked', lock['feeds'][0]['revision'])
+
     def test_user_edits_in_each_managed_overlay_are_preserved_and_rejected(self):
         for relative in ['lang/perl/Makefile', 'utils/dockerd/patches/999-openwrt-skip-host-nested-binaries.patch']:
             with self.subTest(relative=relative):
