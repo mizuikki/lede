@@ -1004,6 +1004,8 @@ class ForkContractTests(unittest.TestCase):
                 '      - name: Recheck packaged manifests and IPK collection\n'
                 '        run: |\n'
                 '          set -euo pipefail\n'
+                '          sudo apt-get update\n'
+                '          sudo apt-get install -y python3-yaml\n'
                 '          python3 .trusted-controller/scripts/check-build-artifacts.py \\\n'
                 '            --release-assets release-assets \\\n'
                 '            --contract .trusted-controller/.github/fork-contract.yml\n',
