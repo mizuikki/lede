@@ -354,6 +354,7 @@ config KERNEL_PSI
 
 config KERNEL_KALLSYMS
 	bool "Compile the kernel with symbol table information"
+	default n if TARGET_qualcommax_ipq60xx
 	default y if !SMALL_FLASH
 	help
 	  This will give you more information in stack traces from kernel oopses.
@@ -445,6 +446,7 @@ config KERNEL_DEBUG_INFO
 
 config KERNEL_DEBUG_INFO_BTF
 	bool "Enable additional BTF type information"
+	default y if !SMALL_FLASH
 	depends on !HOST_OS_MACOS
 	depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED
 	select DWARVES
@@ -471,7 +473,7 @@ config KERNEL_MODULE_ALLOW_BTF_MISMATCH
 
 config KERNEL_DEBUG_INFO_REDUCED
 	bool "Reduce debugging information"
-	default y
+	default y if SMALL_FLASH
 	depends on KERNEL_DEBUG_INFO
 	help
 	  If you say Y here gcc is instructed to generate less debugging
@@ -558,12 +560,20 @@ config KERNEL_KPROBE_EVENTS
 
 config KERNEL_BPF_EVENTS
 	bool "Compile the kernel with BPF event support"
+	default n if TARGET_qualcommax_ipq60xx
+	default y if !SMALL_FLASH
 	select KERNEL_KPROBES
 	help
 	  Allows to attach BPF programs to kprobe, uprobe and tracepoint events.
 	  This is required to use BPF maps of type BPF_MAP_TYPE_PERF_EVENT_ARRAY
 	  for sending data from BPF programs to user-space for post-processing
 	  or logging.
+
+config KERNEL_BPF_STREAM_PARSER
+	bool "Enable BPF stream parser support"
+	default y if !SMALL_FLASH
+	help
+	  Enable BPF socket maps and stream parsing required by dae/daed.
 
 config KERNEL_PROBE_EVENTS_BTF_ARGS
 	bool "Support BTF function arguments for probe events"
@@ -1247,6 +1257,7 @@ config KERNEL_NET_L3_MASTER_DEV
 
 config KERNEL_XDP_SOCKETS
 	bool "XDP sockets support"
+	default y if !SMALL_FLASH
 	help
 	  XDP sockets allows a channel between XDP programs and
 	  userspace applications.
