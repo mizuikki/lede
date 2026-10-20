@@ -1,3 +1,5 @@
+DTS_DIR := $(DTS_DIR)/qcom
+
 define Device/EmmcImage
 	IMAGES += factory.bin
 	IMAGE/factory.bin := append-kernel | pad-to 6144k | append-rootfs | append-metadata
@@ -190,6 +192,7 @@ define Device/redmi_ax5-jdcloud
 	DEVICE_MODEL := AX5 JDCloud
 	DEVICE_DTS_CONFIG := config@cp03-c1
 	SOC := ipq6000
+	SUPPORTED_DEVICES += xiaomi,redmi-ax5-jdcloud
 	DEVICE_PACKAGES := ipq-wifi-redmi_ax5-jdcloud
 endef
 TARGET_DEVICES += redmi_ax5-jdcloud
