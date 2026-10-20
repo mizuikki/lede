@@ -279,7 +279,9 @@ jobs:
           python3 scripts/verify-fork-contract.py \
             --root . --mode source --source-ref "$CANDIDATE_SHA" \
             --trusted-ref "$WORKFLOW_SHA" --output fork-contract-report.json
-          git diff --check "${{ steps.existing.outputs.base_sha }}" "$CANDIDATE_SHA"
+          # Unified patch context contains significant leading/trailing spaces.
+          # Keep upstream patches byte-for-byte; check ordinary source files.
+          git diff --check "${{ steps.existing.outputs.base_sha }}" "$CANDIDATE_SHA" -- . ':(exclude)*.patch'
 
       - name: Register candidate and open a draft PR
         if: >-

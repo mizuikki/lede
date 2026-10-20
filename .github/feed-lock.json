@@ -72,5 +72,19 @@
       "staged_path": "feeds/packages/utils/dockerd/patches/999-openwrt-skip-host-nested-binaries.patch",
       "sha256": "324f61d01039d723085619229d592f4a6ce456e9556e873bdb3228c00b061325"
     }
+  },
+  "go_packages": {
+    "xray-core": {
+      "version": "26.10.17",
+      "source_sha256": "62fb186017bc29c3d10950d7a1a61fd40aff0cb92ba2b77363e9004455f6bf89",
+      "go_mod_sha256": "31fe6bd6c04eb2738e157b850236b1376cbbac3f33e974256bb7325c8c764250",
+      "go_version": "1.27"
+    },
+    "sing-box": {
+      "version": "1.14.3",
+      "source_sha256": "9a8e3712a5f611ad95f1d16874bbdcdffbd3b8eed16dae2d71ce7042a33c3386",
+      "go_mod_sha256": "bcddd492e73c480f878206d36816ae0dbd1cae1a777da57b0fd034e9da721d19",
+      "go_version": "1.25.5"
+    }
   }
 }
