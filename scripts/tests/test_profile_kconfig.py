@@ -19,7 +19,7 @@ BUILD_ROOT = Path(os.environ["OPENWRT_KCONFIG_ROOT"]).resolve() if os.environ.ge
 
 @unittest.skipUnless(BUILD_ROOT, "set OPENWRT_KCONFIG_ROOT for real Kconfig integration")
 class ProfileKconfigTests(unittest.TestCase):
-    def test_profile_overrides_upstream_default_without_dropping_passwall_backends(self):
+    def test_profile_preserves_docker_storage_and_passwall_backends(self):
         build_root = BUILD_ROOT
         profile_path = build_root / "profiles/x86_64-passwall-docker.diffconfig"
         profile_path.write_text((ROOT / "profiles/x86_64-passwall-docker.diffconfig").read_text())
@@ -36,6 +36,9 @@ class ProfileKconfigTests(unittest.TestCase):
                 name, value = line.split("=", 1)
                 values[name] = value
 
+        self.assertEqual(values.get("CONFIG_TARGET_ROOTFS_EXT4FS"), "y")
+        self.assertEqual(values.get("CONFIG_TARGET_ROOTFS_SQUASHFS"), "n")
+        self.assertEqual(values.get("CONFIG_TARGET_ROOTFS_PARTSIZE"), "4096")
         self.assertEqual(values.get("CONFIG_DEFAULT_luci-app-ssr-plus"), "y")
         self.assertNotIn(values.get("CONFIG_PACKAGE_luci-app-ssr-plus"), ("y", "m"))
         self.assertNotIn(values.get("CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn"), ("y", "m"))

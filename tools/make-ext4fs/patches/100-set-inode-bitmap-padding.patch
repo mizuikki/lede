@@ -1,0 +1,12 @@
+--- a/allocate.c
++++ b/allocate.c
+@@ -292,6 +292,9 @@ static void init_bg(struct block_group_info *bg, unsigned int i)
+ 	bg->bitmaps = calloc(info.block_size, 2);
+ 	bg->block_bitmap = bg->bitmaps;
+ 	bg->inode_bitmap = bg->bitmaps + info.block_size;
++	for (u32 inode = info.inodes_per_group;
++	     inode < info.block_size * 8; inode++)
++		bitmap_set_bit(bg->inode_bitmap, inode);
+ 
+ 	bg->header_blocks = header_blocks;
+ 	bg->first_block = aux_info.first_data_block + i * info.blocks_per_group;

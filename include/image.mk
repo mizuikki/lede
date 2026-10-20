@@ -172,8 +172,9 @@ DTC_WARN_FLAGS := \
 DTC_FLAGS += $(DTC_WARN_FLAGS)
 DTCO_FLAGS += $(DTC_WARN_FLAGS)
 
+# Accumulate short reads so conv=sync only pads the final input block.
 define Image/pad-to
-	dd if=$(1) of=$(1).new bs=$(2) conv=sync
+	dd if=$(1) of=$(1).new bs=$(2) iflag=fullblock conv=sync
 	mv $(1).new $(1)
 endef
 

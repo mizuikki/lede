@@ -122,6 +122,11 @@ scripts/apply-profile.sh x86_64-passwall-docker --sync-all-feeds &&
 make -j"$(nproc)"
 ```
 
+此 profile 使用 ext4 根文件系统，根分区为 4096 MiB；整盘镜像还包含
+64 MiB 引导分区。Docker 默认数据目录 `/opt/docker` 位于 ext4 上，支持
+containerd 的 overlayfs snapshotter。该 profile 不生成 SquashFS 镜像。
+首次启动会在网络服务启动前注册 Docker 网桥，避免网络配置重载删除 `docker0`。
+
 全量同步先解析所有分支的完整 SHA，在临时源码目录安装所有 feeds、固定版本的
 官方 Perl 和 Docker 补丁，并从通过 `PKG_HASH` 校验的 Xray/Sing-Box 源码检查
 `go.mod` 的 Go 版本要求。全部检查成功后才替换 feeds 和包链接，并更新

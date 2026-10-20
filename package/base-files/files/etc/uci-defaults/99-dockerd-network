@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# Register Docker's bridge before netifd starts. Adding it during dockerd's
+# first boot can let an asynchronous network reload remove the live bridge.
+[ -x /etc/init.d/dockerd ] || exit 0
+
+/etc/init.d/dockerd uciadd

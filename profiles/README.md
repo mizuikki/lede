@@ -19,6 +19,14 @@ scripts/apply-profile.sh x86_64-passwall-docker
 make -j"$(nproc)"
 ```
 
+The `x86_64-passwall-docker` profile builds an ext4 root filesystem with a
+4096 MiB root partition. Docker's default `/opt/docker` data directory therefore
+resides on ext4, which supports the containerd overlayfs snapshotter. The combined
+disk image also includes a 64 MiB boot partition. SquashFS images are disabled for
+this profile because Docker cannot use the system overlay as its upper directory.
+On first boot, Docker's bridge is registered before the network service starts,
+so a later network configuration reload does not remove `docker0`.
+
 ## Refresh a profile
 
 After changing `.config` (e.g. via `make menuconfig`), regenerate the profile:

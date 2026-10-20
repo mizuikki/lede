@@ -6,7 +6,7 @@
       "url": "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git",
       "branch": "main",
       "configured_branch": "main",
-      "revision": "1af0a5c4fb3a227201683b64d32f61c65db9be72",
+      "revision": "6edb7efcf3a9505128824ea47c1c058151e290af",
       "order": 1
     },
     {
@@ -14,7 +14,7 @@
       "url": "https://github.com/Openwrt-Passwall/openwrt-passwall.git",
       "branch": "main",
       "configured_branch": "main",
-      "revision": "8f7323858c6a76e55d5874bc7704e5a18bf3c951",
+      "revision": "ab7ff4c21e2f5f9f8f054b4a2798cb0138b7a9f2",
       "order": 2
     },
     {
@@ -22,7 +22,7 @@
       "url": "https://github.com/coolsnowwolf/packages.git",
       "branch": "master",
       "configured_branch": null,
-      "revision": "3d95b298933ef0ece9d007ed8de2185e39416979",
+      "revision": "37992e691dad6d567185581903e77da4cb2192df",
       "order": 3
     },
     {
@@ -30,7 +30,7 @@
       "url": "https://github.com/coolsnowwolf/luci.git",
       "branch": "openwrt-25.12",
       "configured_branch": "openwrt-25.12",
-      "revision": "9ee71ced1dc0e0fbb8722297bcff81ccb0e1f9a4",
+      "revision": "f017a872bf1aaf714d578c3cfd1f5316591622fe",
       "order": 4
     },
     {
@@ -54,7 +54,7 @@
       "url": "https://github.com/fw876/helloworld.git",
       "branch": "dev",
       "configured_branch": null,
-      "revision": "2d9199beb9f363156d83863e1cae42cda87c161d",
+      "revision": "0d24da050f2354f48fe8992628054417a5c4b9da",
       "order": 7
     }
   ],
@@ -62,7 +62,7 @@
     "official_perl": {
       "repository": "https://github.com/openwrt/packages",
       "branch": "openwrt-25.12",
-      "revision": "54fab7fa4224193a121f49a9f39dafd9323a0b2d",
+      "revision": "9822cc9ee869d3cc1c5124a8697de4e8cd935d11",
       "path": "feeds/packages/lang/perl",
       "tree": "8a52429a125263c9841f4afd8359b79bdf269cc2",
       "sha256": "0f944c2543ff7b85385f1edc04532746829ac2b083f81fc2569351ed40aaca1c"
@@ -75,9 +75,9 @@
   },
   "go_packages": {
     "xray-core": {
-      "version": "26.10.10",
-      "source_sha256": "bc4b3fbe9f2612a7e8b7fffd4b7195f00ad4aa28478f3621fce925cb6190c036",
-      "go_mod_sha256": "8cde5eb95a6b84a1ae98b8a80b2786bf3786bbba2bc995d37f27bb0d9d5bd66b",
+      "version": "26.10.17",
+      "source_sha256": "62fb186017bc29c3d10950d7a1a61fd40aff0cb92ba2b77363e9004455f6bf89",
+      "go_mod_sha256": "31fe6bd6c04eb2738e157b850236b1376cbbac3f33e974256bb7325c8c764250",
       "go_version": "1.27"
     },
     "sing-box": {
